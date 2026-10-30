@@ -1,11 +1,12 @@
-# FastAPI + React starter
+# Family meal ordering MVP
 
-A small full-stack starter with a working task list. React and TypeScript run in Vite, FastAPI serves the API, and SQLAlchemy uses SQLite locally or PostgreSQL in production. Alembic manages the schema.
+A guest ordering flow built with React, TypeScript, Vite, FastAPI, SQLAlchemy, Alembic, and PostgreSQL. SQLite is available for local development. Customers can select one of two three-day family meal packages, provide contact and delivery details, and receive an order ID after a successful database insert.
 
 ## Requirements
 
-- Python 3.12+ and Node.js 20.19+ (or 22.12+)
-- npm
+- Python 3.12+
+- Node.js 20.19+ (or 22.12+) and npm
+- PostgreSQL for pilot or production use (SQLite is the local default)
 
 ## Run locally
 
@@ -29,36 +30,19 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173. Vite forwards `/api` requests to the API at http://127.0.0.1:8000. Interactive API documentation is at http://localhost:8000/docs. The SQLite database is `backend/app.db` and is not tracked by Git.
+Open http://localhost:5173. Vite forwards `/api` requests to http://127.0.0.1:8000. API docs are at http://localhost:8000/docs. The local database is `backend/app.db`.
 
-## Database and migrations
+Guest submissions are disabled by default. The order form can be exercised locally by setting `PUBLIC_ORDER_SUBMISSIONS_ENABLED=true` in `backend/.env`, then restarting the API. Leave this setting false until the pilot is approved. `DATABASE_URL` defaults to SQLite locally; set it to a PostgreSQL URL for the pilot. Existing database migrations are preserved and the `0002` migration adds the orders table.
 
-SQLite is the default. Set `DATABASE_URL` in `backend/.env` to a PostgreSQL connection string to use PostgreSQL instead. Standard `postgres://` and `postgresql://` URLs are converted to SQLAlchemy's psycopg driver automatically; query parameters such as `sslmode=require` are preserved. SQLite and PostgreSQL are separate databases; changing the URL does not transfer local data.
+## Order request
 
-After changing a model, generate and review a migration, then apply it:
-
-```bash
-cd backend
-alembic revision --autogenerate -m "describe change"
-alembic upgrade head
-```
-
-Migrations create the schema; the API does not create tables automatically. Run them against each database you use.
-
-## Deploy later
-
-1. Create a Neon database and copy its connection string, including its SSL settings. Keep it secret.
-2. Create a Render web service from this repository using the root-level `render.yaml` Blueprint. Set `DATABASE_URL` to the Neon connection string and `CORS_ORIGINS` to your Vercel site's exact HTTPS origin, for example `https://your-project.vercel.app`. Separate multiple allowed origins with commas and omit trailing slashes. The service runs migrations at startup; its health check is `/api/health`.
-3. Import the repository into Vercel and set the project root directory to `frontend`. Use the Vite framework preset, and set `VITE_API_URL` to the Render service origin, for example `https://your-api.onrender.com`, without `/api`. Redeploy after changing the variable: Vite embeds it at build time. Do not put secrets in `VITE_` variables.
-4. Once the Vercel URL is known, add it to Render's `CORS_ORIGINS` and redeploy or restart the API. Preview deployments need their exact origins added as well.
-
-The startup migration is convenient for a single-instance starter and free Render services. Before scaling to multiple instances or running deployments with incompatible schema changes, move migrations to a separate, coordinated deployment step; Render's pre-deploy command is available on paid services. Never use the local SQLite file as production storage on Render's ephemeral filesystem.
+`POST /api/orders` accepts a package ID (`family-classic` or `family-vegetarian`), contact name, email, phone, delivery address, city, postal code, delivery date, and optional delivery instructions. The API validates the package and required details, requires a delivery date at least one day in the future, and responds with the created numeric order ID and package ID. Requests return `503` while submissions are disabled and `422` for invalid input.
 
 ## Verify
 
 ```bash
 cd backend
-pytest
+.venv/bin/python -m pytest
 ```
 
 ```bash
@@ -66,11 +50,4 @@ cd frontend
 npm run build
 ```
 
-## Layout
-
-- `backend/app` — API, database configuration, model, and schemas
-- `backend/alembic` — database migrations
-- `frontend/src` — React UI and API client
-- `render.yaml` — Render service configuration
-
-The task list is an example and has no authentication. Add access control before exposing private or user-specific data.
+This MVP does not include customer accounts or payment processing.
