@@ -5,15 +5,19 @@ from typing import Annotated
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.admin_products import router as admin_products_router
+from app.admin_images import router as admin_images_router
 from app.admin_orders import router as admin_orders_router
+from app.admin_batches import router as admin_batches_router
+from app.admin_reports import router as admin_reports_router
+from app.admin_windows import router as admin_windows_router
 from app.admin_zones import is_zone_active, router as admin_zones_router
 from app.database import get_db
 from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product
-from app.schemas import DeliveryWindowRead, DeliveryZoneRead, OrderCreate, OrderCreated, ProductRead
+from app.schemas import DeliveryWindowRead, DeliveryZoneRead, OrderCreate, OrderCreated, ProductRead, ProductDetailRead
 
 load_dotenv()
 app = FastAPI(title="CREDEM Home API", version="0.1.0")
@@ -26,8 +30,12 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 app.include_router(admin_products_router)
+app.include_router(admin_images_router)
 app.include_router(admin_zones_router)
 app.include_router(admin_orders_router)
+app.include_router(admin_batches_router)
+app.include_router(admin_reports_router)
+app.include_router(admin_windows_router)
 
 
 def utc_datetime(value: datetime) -> datetime:
@@ -47,6 +55,14 @@ def list_products(db: Annotated[Session, Depends(get_db)]) -> list[Product]:
     ).order_by(Product.id)))
 
 
+@app.get("/api/products/{product_id}", response_model=ProductDetailRead)
+def product_detail(product_id: int, db: Annotated[Session, Depends(get_db)]) -> Product:
+    product = db.get(Product, product_id)
+    if product is None or not product.available or product.demo_only:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+
+
 @app.get("/api/delivery-zones", response_model=list[DeliveryZoneRead])
 def list_delivery_zones(db: Annotated[Session, Depends(get_db)]) -> list[DeliveryZone]:
     zones = db.scalars(select(DeliveryZone).where(DeliveryZone.active.is_(True)).order_by(DeliveryZone.id)).all()
@@ -64,6 +80,9 @@ def list_delivery_windows(db: Annotated[Session, Depends(get_db)], zone_id: Anno
         .where(
             DeliveryWindow.zone_id == zone_id,
             DeliveryZone.active.is_(True),
+            DeliveryWindow.is_demo.is_(False),
+            DeliveryWindow.active.is_(True),
+            or_(DeliveryWindow.capacity.is_(None), DeliveryWindow.reserved_orders < DeliveryWindow.capacity),
             DeliveryWindow.ordering_cutoff > now,
             DeliveryWindow.delivery_at > now,
         )
@@ -86,7 +105,7 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
 
     window = db.get(DeliveryWindow, payload.delivery_window_id)
     now = datetime.now(timezone.utc)
-    if (window is None or window.zone_id != zone.id
+    if (window is None or window.is_demo or not window.active or window.zone_id != zone.id
             or utc_datetime(window.ordering_cutoff) <= now
             or utc_datetime(window.delivery_at) <= now):
         raise HTTPException(status_code=400, detail="Delivery window is unavailable for this zone")
@@ -112,10 +131,22 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
                   location_verification_status="unverified" if payload.latitude is not None else "unlocated",
                   delivery_instructions=payload.delivery_instructions)
     try:
+        reserved = db.execute(update(DeliveryWindow).where(
+            DeliveryWindow.id == window.id, DeliveryWindow.zone_id == zone.id,
+            DeliveryWindow.is_demo.is_(False),
+            DeliveryWindow.active.is_(True), DeliveryWindow.ordering_cutoff > datetime.now(timezone.utc),
+            DeliveryWindow.delivery_at > datetime.now(timezone.utc),
+            or_(DeliveryWindow.capacity.is_(None), DeliveryWindow.reserved_orders < DeliveryWindow.capacity),
+        ).values(reserved_orders=DeliveryWindow.reserved_orders + 1).execution_options(synchronize_session=False))
+        if reserved.rowcount != 1:
+            raise HTTPException(status_code=400, detail="Delivery window is full or unavailable")
         db.add(order)
         db.flush()
         db.add_all([OrderItem(order_id=order.id, product_id=item.product_id, quantity=item.quantity,
-                              unit_price_bani=products[item.product_id].price_bani) for item in payload.items])
+                              unit_price_bani=products[item.product_id].price_bani,
+                              storage_type_snapshot=products[item.product_id].storage_type,
+                              net_weight_g_snapshot=products[item.product_id].net_weight_g,
+                              unit_snapshot=products[item.product_id].unit) for item in payload.items])
         db.commit()
     except Exception:
         db.rollback()

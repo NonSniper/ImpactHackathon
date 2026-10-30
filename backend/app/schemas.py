@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,9 +26,14 @@ class ProductRead(BaseModel):
     shelf_life_days: int | None
     preparation_instructions: str | None
     supplier: str
+    image_preview_url: str | None
 
 
-class AdminProductRead(ProductRead):
+class ProductDetailRead(ProductRead):
+    image_detail_url: str | None
+
+
+class AdminProductRead(ProductDetailRead):
     production_cost_bani: int | None
 
 
@@ -140,6 +145,71 @@ class DeliveryWindowRead(BaseModel):
     delivery_at: datetime
     ordering_cutoff: datetime
 
+    @field_validator("delivery_at", "ordering_cutoff")
+    @classmethod
+    def normalize_to_utc(cls, value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+class AdminDeliveryWindowRead(DeliveryWindowRead):
+    active: bool
+    capacity: int | None
+    reserved_orders: int
+    is_demo: bool
+
+
+class DeliveryWindowCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zone_id: int = Field(strict=True, gt=0)
+    delivery_at: datetime
+    ordering_cutoff: datetime
+    active: bool = True
+    capacity: int | None = Field(default=None, strict=True, gt=0, le=2_147_483_647)
+
+    @field_validator("delivery_at", "ordering_cutoff")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("A timezone is required")
+        return value.astimezone(timezone.utc)
+
+
+class DeliveryWindowUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_at: datetime | None = None
+    ordering_cutoff: datetime | None = None
+    active: bool | None = None
+    capacity: int | None = Field(default=None, strict=True, gt=0, le=2_147_483_647)
+
+    @field_validator("delivery_at", "ordering_cutoff")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("A timezone is required")
+            return value.astimezone(timezone.utc)
+        return None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_null_required_fields(cls, data: object) -> object:
+        if isinstance(data, dict) and any(key in data and data[key] is None for key in ("delivery_at", "ordering_cutoff", "active")):
+            raise ValueError("Date, cutoff and active cannot be null")
+        return data
+
+
+class OrderStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["requested", "confirmed", "packed", "dispatched", "delivered"]
+
+
+class OrderStatusRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    status: str
+
 
 class OrderItemCreate(BaseModel):
     product_id: int = Field(strict=True, gt=0)
@@ -216,12 +286,153 @@ class AdminMapOrder(BaseModel):
     delivery_instructions: str | None
     total_bani: int
     status: str
-    delivery_batch_id: int | None = None
+    delivery_batch_id: int | None
+    is_demo: bool
 
 
 class AdminMapResponse(BaseModel):
     markers: list[AdminMapOrder]
     unlocated: list[AdminMapOrder]
+
+
+class DeliveryBatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zone_id: int = Field(strict=True, gt=0)
+    delivery_window_id: int = Field(strict=True, gt=0)
+    order_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(min_length=1, max_length=500)
+
+    @field_validator("order_ids")
+    @classmethod
+    def validate_order_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("Order IDs must be unique")
+        return value
+
+
+class DeliveryBatchRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    zone_id: int
+    delivery_window_id: int
+    storage_type: str
+    status: str
+    created_at: datetime
+    is_demo: bool
+
+
+class DeliveryBatchDetail(DeliveryBatchRead):
+    order_ids: list[int]
+
+
+class DeliveryBatchSummary(BaseModel):
+    batch_id: int
+    is_demo: bool
+    household_count: int
+    total_item_quantity: int
+    total_sales_bani: int
+    total_weight_g: int | None
+    known_weight_g: int
+
+
+class ProductionProductTotal(BaseModel):
+    product_id: int
+    name: str
+    sku: str | None
+    unit: str | None
+    quantity: int
+    total_weight_g: int | None
+    known_weight_g: int
+
+
+class ProductionTotals(BaseModel):
+    batch_id: int
+    is_demo: bool
+    products: list[ProductionProductTotal]
+
+
+class BatchCostUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    estimate_kind: Literal["demo", "operational"] | None = None
+    estimated_transport_bani: int | None = Field(default=None, strict=True, ge=0, le=2_147_483_647)
+    estimated_packaging_per_order_bani: int | None = Field(default=None, strict=True, ge=0, le=2_147_483_647)
+
+
+class BatchCostConfig(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    is_demo: bool
+    estimate_kind: Literal["demo", "operational"] | None
+    estimated_transport_bani: int | None
+    estimated_packaging_per_order_bani: int | None
+
+
+class UnpricedProduct(BaseModel):
+    product_id: int
+    reason: Literal["missing_cost", "unknown_order_unit", "unit_or_weight_changed"]
+
+
+class FinancialSummary(BaseModel):
+    batch_id: int
+    is_demo: bool
+    estimate_kind: Literal["demo", "operational"] | None
+    estimate_complete: bool
+    household_count: int
+    revenue_bani: int
+    estimated_food_cost_bani: int | None
+    known_food_cost_bani: int
+    unpriced_products: list[UnpricedProduct]
+    estimated_packaging_cost_bani: int | None
+    estimated_transport_bani: int | None
+    delivery_cost_per_household_bani: int | None
+    contribution_before_overhead_bani: int | None
+    orders_needed_to_cover_transport: int | None
+    transport_break_even_possible: bool | None
+
+
+class PackingItem(BaseModel):
+    product_id: int
+    name: str
+    sku: str | None
+    quantity: int
+    unit: str | None
+    net_weight_g: int | None
+
+
+class PackingOrder(BaseModel):
+    order_id: int
+    is_demo: bool
+    customer_name: str
+    items: list[PackingItem]
+
+
+class PackingReport(BaseModel):
+    batch_id: int
+    orders: list[PackingOrder]
+
+
+class DeliveryStop(BaseModel):
+    order_id: int
+    is_demo: bool
+    customer_name: str
+    phone: str
+    address: str
+    latitude: float | None
+    longitude: float | None
+    location_verification_status: str
+    delivery_instructions: str | None
+    status: str
+    total_bani: int
+
+
+class DeliveryManifest(BaseModel):
+    batch_id: int
+    zone_id: int
+    delivery_window_id: int
+    stops: list[DeliveryStop]
 
 
 class OrderCreated(BaseModel):

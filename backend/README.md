@@ -59,10 +59,27 @@ Lists products that are both available and approved (not `demo_only`). Unavailab
     "allergens": null,
     "shelf_life_days": null,
     "preparation_instructions": null,
-    "supplier": "CREDEM"
+    "supplier": "CREDEM",
+    "image_preview_url": null
   }
 ]
 ```
+
+`GET /api/products/{id}` returns the same information plus `image_detail_url`. It only returns available, approved products; other IDs return `404`. Both image URLs can be `null`.
+
+### Product photos
+
+Administrators can use `POST /api/admin/products/{id}/images` with bearer authentication and `multipart/form-data` fields `preview` and `detail`. Both are required. Accepted content is JPEG, PNG or WebP (not animated); preview is limited to 320×320 pixels and 1 MiB, detail to 1280×1280 pixels and 5 MiB. The backend decodes and re-encodes images as WebP, strips metadata, and rejects malformed, oversized or unsupported files. The response is the updated admin product with `image_preview_url` and `image_detail_url`. `DELETE /api/admin/products/{id}/images` removes the references and attempts to delete both stored objects. Replacement preserves the old references if upload fails; unsuccessful cleanup is logged and can leave unused objects in storage.
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/admin/products/1/images" \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  -F "preview=@preview.webp" -F "detail=@detail.webp"
+curl -X DELETE "http://127.0.0.1:8000/api/admin/products/1/images" \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN"
+```
+
+For persistent storage, create an S3-compatible bucket (for example Cloudflare R2), configure an HTTPS public URL for objects, and set `IMAGE_STORAGE_BUCKET`, `IMAGE_STORAGE_ACCESS_KEY_ID`, `IMAGE_STORAGE_SECRET_ACCESS_KEY`, `IMAGE_PUBLIC_BASE_URL` and `IMAGE_STORAGE_REGION` (`auto` for R2). Set `IMAGE_STORAGE_ENDPOINT` to the provider's HTTPS S3 endpoint (required for R2; omit for AWS). Grant the backend credentials permission to upload and delete objects in that bucket. The public URL must serve the same bucket and path; object read access must be configured at the provider. Keep credentials in server environment variables, never in React or source control. Without this configuration, upload returns `503` and the rest of the API remains available. The seed does not include image URLs; frontend can show a placeholder when URLs are null. Configure a request-body size limit at the reverse proxy as well, because multipart parsing occurs before application-level image validation.
 
 ### `GET /api/delivery-zones`
 
@@ -80,7 +97,7 @@ Lists active delivery zones. A subzone is listed only if its parent sector is al
 
 ### `GET /api/delivery-windows?zone_id=1`
 
-Lists windows in an active zone whose delivery and ordering cutoff are still in the future. An unknown or inactive zone returns an empty list.
+Lists active windows in an active zone whose delivery and ordering cutoff are still in the future and which have capacity available. An unknown or inactive zone returns an empty list.
 
 ```json
 [
@@ -173,11 +190,11 @@ Example `POST /api/admin/delivery-zones` body:
 }
 ```
 
-The returned zone contains its new `id` and the fields shown in the public zone example. Use actual sector IDs from `GET /api/admin/delivery-zones`. Delivery windows must exist for a zone before it can receive orders; admin window management is not implemented yet.
+The returned zone contains its new `id` and the fields shown in the public zone example. Use actual sector IDs from `GET /api/admin/delivery-zones`. Delivery windows must exist for a zone before it can receive orders.
 
 ### Admin order map and location review
 
-Both endpoints require the admin bearer token. `GET /api/admin/orders/map` returns two arrays: `markers` (orders with coordinates) and `unlocated` (orders without coordinates). Optional query filters are `city`, `zone_id`, `date` (delivery date in UTC, `YYYY-MM-DD`), `window_id`, `status` (order status), and `location_status` (`unlocated`, `unverified`, `verified`, or `flagged`). Filters apply to both arrays. `delivery_batch_id` is currently always `null`; batching and batch filtering are not yet implemented.
+Both endpoints require the admin bearer token. `GET /api/admin/orders/map` returns two arrays: `markers` (orders with coordinates) and `unlocated` (orders without coordinates). Optional query filters are `city`, `zone_id`, `date` (delivery date in UTC, `YYYY-MM-DD`), `window_id`, `batch_id`, `status` (order status), `is_demo` (boolean), and `location_status` (`unlocated`, `unverified`, `verified`, or `flagged`). Filters apply to both arrays. `delivery_batch_id` is `null` until the order is assigned to a batch; `is_demo` distinguishes simulated orders.
 
 Example response, with illustrative coordinates and address:
 
@@ -188,10 +205,122 @@ Example response, with illustrative coordinates and address:
     "latitude": 47.04, "longitude": 28.86, "coordinate_source": "manual_map_pin",
     "location_verification_status": "unverified", "location_review_note": null,
     "delivery_instructions": null, "total_bani": 65000, "status": "requested",
-    "delivery_batch_id": null
+    "delivery_batch_id": null, "is_demo": false
   }],
   "unlocated": []
 }
 ```
 
 `PATCH /api/admin/orders/{id}/location` updates the coordinates or manual review state. For example, `{"location_verification_status":"flagged", "location_review_note":"Verifică sectorul"}` flags a suspected mismatch for review. An admin can mark a location `verified` after checking it. Updating coordinates requires both values and resets the status to `unverified` unless an explicit status is provided. Send both coordinates as `null` to clear a pin. No geographic boundary checks are implemented.
+
+### Admin delivery batches
+
+All endpoints require the admin bearer token:
+
+- `GET /api/admin/batches` lists batches.
+- `POST /api/admin/batches` creates a batch and assigns orders atomically.
+- `GET /api/admin/batches/{id}` returns the batch and assigned order IDs.
+- `GET /api/admin/batches/{id}/summary` returns household count, item quantity, sales value and weight.
+- `GET /api/admin/batches/{id}/production` returns product quantities and weights for preparation.
+
+Example request to create a batch:
+
+```json
+{"zone_id": 3, "delivery_window_id": 4, "order_ids": [1, 2]}
+```
+
+Example summary:
+
+```json
+{
+  "batch_id": 1,
+  "is_demo": false,
+  "household_count": 2,
+  "total_item_quantity": 6,
+  "total_sales_bani": 160000,
+  "total_weight_g": null,
+  "known_weight_g": 1000
+}
+```
+
+All orders must belong to the specified zone and window and be unassigned. Every item in a batch must have the same known storage type (`fresh`, `chilled`, or `frozen`); mixed and unvalidated storage types are rejected until compatible transport is confirmed. Newly submitted orders snapshot product storage and weight. Items in orders made before migration 0007 have unknown snapshots and cannot be batched automatically; the migration does not guess their historical requirements. An order cannot be assigned twice. `total_sales_bani` includes delivery fees. `total_weight_g` is `null` if any item lacks a weight; `known_weight_g` is the sum of available weights. Stop ordering is not implemented yet.
+
+Example production totals:
+
+```json
+{
+  "batch_id": 1,
+  "is_demo": false,
+  "products": [
+    {"product_id": 1, "name": "Plan de mese", "sku": null, "unit": "pack",
+     "quantity": 3, "total_weight_g": 1500, "known_weight_g": 1500}
+  ]
+}
+```
+
+Quantities are grouped by product and by the unit saved with each order item, so different units are never added together. Product names and SKUs reflect the current catalog; units and weights are snapshots. An unknown unit is returned as `null`, including for items ordered before migration 0008; an unknown total weight is `null`, with the known portion reported separately. Meal plans are counted as whole products; their components are not yet modeled.
+
+### Admin cost assumptions and financial estimates
+
+All endpoints require the admin bearer token. `GET /api/admin/batches/{id}/costs` reads the assumptions, and `PATCH` on the same path updates them. Product `production_cost_bani` is configured through the admin product API and is interpreted as an estimated cost per current product unit. Configure batch assumptions, for example:
+
+```json
+{
+  "estimate_kind": "demo",
+  "estimated_transport_bani": 30000,
+  "estimated_packaging_per_order_bani": 3000
+}
+```
+
+`estimate_kind` is `demo` or `operational`: both describe estimates, not actual accounting records. Fields can be cleared by setting them to `null`. Demo assumptions are labeled per batch; actual expenses are not stored by these endpoints.
+
+`GET /api/admin/batches/{id}/financial-summary` returns revenue including delivery fees, estimated food, packaging and transport costs, delivery cost per household, contribution before fixed overhead, and the estimated number of orders needed to cover transport. Each order counts as one household. The transport cost per household rounds up to the next whole ban. Break-even assumes future orders have the same average revenue and variable costs as the current batch, with a fixed transport cost; it is unavailable if that average margin is not positive. A zero transport cost requires zero orders to cover it.
+
+An estimate is complete only when its kind, transport, packaging and all product costs are known. Unknown product costs, order units or changed product units/weights are reported in `unpriced_products`; `known_food_cost_bani` contains only the known portion. The complete food cost, contribution and break-even values are `null` when required information is missing. Calculations use current product cost assumptions and can change when the admin edits them; they are not actual recorded expenses.
+
+### Admin packing and delivery reports
+
+All routes require the admin bearer token. For a batch, `GET /api/admin/batches/{id}/packing-list` shows products and quantities per order. `GET /api/admin/batches/{id}/delivery-manifest` lists the delivery stops, addresses, telephone numbers, pins and instructions. Stops are ordered by ID; this is not route optimization.
+
+Download `GET /api/admin/batches/{id}/exports/orders.csv` for the manifest or `GET /api/admin/batches/{id}/exports/production.csv` for production totals. CSV files use UTF-8 with BOM and protect text cells that spreadsheet programs might interpret as formulas. Unknown values are empty cells. The order export contains customer data and must be handled as an admin-only file.
+
+### Admin delivery windows and order status
+
+All routes require the admin bearer token:
+
+- `GET /api/admin/delivery-windows` lists windows, with optional `zone_id` filter, including inactive and full windows.
+- `POST /api/admin/delivery-windows` creates a window.
+- `PATCH /api/admin/delivery-windows/{id}` changes dates, cutoff, active state or capacity.
+- `PATCH /api/admin/orders/{id}/status` moves an order to its next fulfillment status.
+
+Example window creation (dates are illustrative and must be in the future):
+
+```json
+{
+  "zone_id": 1,
+  "delivery_at": "2026-11-10T12:00:00Z",
+  "ordering_cutoff": "2026-11-09T12:00:00Z",
+  "capacity": 30,
+  "active": true
+}
+```
+
+Times must include a timezone and are returned in UTC. `capacity` counts orders and may be `null` for no limit. Each saved order reserves one place atomically. `reserved_orders` appears in admin responses; a full or inactive window cannot receive orders. Capacity cannot be set below existing reservations, and dates cannot be changed after an order is placed. Migration 0010 counts existing orders as reservations. Order cancellation and releasing a reserved place are not implemented yet.
+
+Status updates use `{"status":"confirmed"}` and proceed one step at a time: `requested → confirmed → packed → dispatched → delivered`. Repeating the current status is allowed; skipping or reversing a step returns `409`. The status describes fulfillment and does not represent a payment.
+
+### Simulated order dataset
+
+After migrations and the normal `python -m app.seed`, create 50 simulated orders with:
+
+```bash
+python -m app.seed_demo_orders
+```
+
+Run it again without `--reset` to keep the existing dataset unchanged. To replace **only** this script's simulated orders and remove their now-empty demo batches:
+
+```bash
+python -m app.seed_demo_orders --reset
+```
+
+The dataset uses fictitious names, phone labels, addresses and illustrative coordinates; these are not real customers or verified locations. Its non-orderable simulation products and costs are invented. The orders use an isolated `is_demo` delivery window that does not appear to customers or consume real window capacity. Admin map results can be filtered with `?is_demo=true`; reports, CSVs, windows and batches indicate demo data. Demo and real orders cannot be combined in a batch, and a demo batch cannot be labeled as an operational estimate. Use the order IDs and demo window ID returned by the admin map to create a demo batch. Resetting deletes only orders bearing this dataset's key, preserving real orders and any other demo datasets.

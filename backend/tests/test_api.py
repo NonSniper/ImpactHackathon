@@ -1,19 +1,29 @@
+import csv
+import io
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from PIL import Image
 
 from app.database import Base, get_db
 from app.main import app
-from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product
+from app.models import DeliveryBatch, DeliveryWindow, DeliveryZone, Order, OrderItem, Product
+from app import image_storage
 
 
 @pytest.fixture
 def api(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
     Base.metadata.create_all(engine)
     now = datetime.now(timezone.utc)
     with Session(engine) as db:
@@ -57,6 +67,119 @@ def valid_order():
         "zone_id": 1, "delivery_window_id": 1,
         "items": [{"product_id": 1, "quantity": 2, "unit_price_bani": 1}, {"product_id": 2, "quantity": 1}],
     }
+
+
+class FakeImageStorage:
+    def __init__(self):
+        self.objects = {}
+        self.fail_on_detail = False
+
+    def put(self, key, content):
+        if self.fail_on_detail and key.endswith("detail.webp"):
+            raise OSError("storage unavailable")
+        self.objects[key] = content
+        return "https://images.example.test/" + key
+
+    def delete(self, key):
+        self.objects.pop(key, None)
+
+
+def make_image(size=(20, 20), image_format="PNG"):
+    result = io.BytesIO()
+    Image.new("RGB", size, "red").save(result, image_format)
+    return result.getvalue()
+
+
+def image_upload(preview=None, detail=None):
+    return {"preview": ("preview.png", preview if preview is not None else make_image(), "image/png"),
+            "detail": ("detail.png", detail if detail is not None else make_image(), "image/png")}
+
+
+def test_product_images_lifecycle_and_public_catalog(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    storage = FakeImageStorage()
+    monkeypatch.setattr(image_storage, "get_image_storage", lambda: storage)
+    headers = {"Authorization": "Bearer test-secret"}
+    assert client.post("/api/admin/products/1/images", files=image_upload()).status_code == 401
+    assert client.delete("/api/admin/products/1/images").status_code == 401
+    response = client.post("/api/admin/products/1/images", headers=headers, files=image_upload())
+    assert response.status_code == 200
+    urls = response.json()
+    assert urls["image_preview_url"].endswith("/preview.webp")
+    assert urls["image_detail_url"].endswith("/detail.webp")
+    assert len(storage.objects) == 2
+    assert all(Image.open(io.BytesIO(content)).format == "WEBP" for content in storage.objects.values())
+    listed = client.get("/api/products").json()[0]
+    assert listed["image_preview_url"] == urls["image_preview_url"]
+    assert "image_detail_url" not in listed and "image_preview_key" not in listed
+    assert client.get("/api/products/1").json()["image_detail_url"] == urls["image_detail_url"]
+    assert client.get("/api/products/4").status_code == 404
+    replaced = client.post("/api/admin/products/1/images", headers=headers, files=image_upload()).json()
+    assert replaced["image_preview_url"] != urls["image_preview_url"] and len(storage.objects) == 2
+    assert client.delete("/api/admin/products/1/images", headers=headers).status_code == 204
+    assert len(storage.objects) == 0
+    assert client.get("/api/products/1").json()["image_detail_url"] is None
+
+
+def test_product_images_validation_and_failed_replacement(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    storage = FakeImageStorage()
+    monkeypatch.setattr(image_storage, "get_image_storage", lambda: storage)
+    headers = {"Authorization": "Bearer test-secret"}
+    path = "/api/admin/products/1/images"
+    original = client.post(path, headers=headers, files=image_upload()).json()
+    old_objects = storage.objects.copy()
+    assert client.post(path, headers=headers, files=image_upload(preview=b"<svg></svg>")).status_code == 422
+    assert client.post(path, headers=headers, files=image_upload(preview=make_image((321, 1)))).status_code == 422
+    assert client.post(path, headers=headers, files=image_upload(detail=make_image((1281, 1)))).status_code == 422
+    assert client.post(path, headers=headers, files=image_upload(preview=b"x" * (1024 * 1024 + 1))).status_code == 413
+    assert client.post(path, headers=headers, files=image_upload(detail=make_image()[:20])).status_code == 422
+    storage.fail_on_detail = True
+    assert client.post(path, headers=headers, files=image_upload()).status_code == 503
+    assert storage.objects == old_objects
+    assert client.get("/api/products/1").json()["image_preview_url"] == original["image_preview_url"]
+
+
+def test_unconfigured_image_storage(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    monkeypatch.delenv("IMAGE_STORAGE_BUCKET", raising=False)
+    response = client.post("/api/admin/products/1/images", headers={"Authorization": "Bearer test-secret"}, files=image_upload())
+    assert response.status_code == 503
+    assert client.get("/api/products/1").json()["image_preview_url"] is None
+
+
+@pytest.mark.parametrize("image_format", ["JPEG", "PNG", "WEBP"])
+def test_product_images_accept_supported_formats(api, monkeypatch, image_format):
+    client, _ = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    storage = FakeImageStorage()
+    monkeypatch.setattr(image_storage, "get_image_storage", lambda: storage)
+    data = make_image(image_format=image_format)
+    response = client.post("/api/admin/products/1/images", headers={"Authorization": "Bearer test-secret"},
+                           files=image_upload(preview=data, detail=data))
+    assert response.status_code == 200
+
+
+def test_s3_adapter_uses_configured_bucket_and_content_type(monkeypatch):
+    from unittest.mock import Mock
+
+    client = Mock()
+    make_client = Mock(return_value=client)
+    monkeypatch.setattr(image_storage.boto3, "client", make_client)
+    for key, value in {"IMAGE_STORAGE_BUCKET": "products", "IMAGE_STORAGE_ACCESS_KEY_ID": "key",
+                       "IMAGE_STORAGE_SECRET_ACCESS_KEY": "secret", "IMAGE_STORAGE_REGION": "auto",
+                       "IMAGE_STORAGE_ENDPOINT": "https://storage.example.test",
+                       "IMAGE_PUBLIC_BASE_URL": "https://images.example.test"}.items():
+        monkeypatch.setenv(key, value)
+    storage = image_storage.get_image_storage()
+    assert storage.put("products/1/photo.webp", b"image") == "https://images.example.test/products/1/photo.webp"
+    client.put_object.assert_called_once_with(Bucket="products", Key="products/1/photo.webp", Body=b"image", ContentType="image/webp")
+    storage.delete("products/1/photo.webp")
+    client.delete_object.assert_called_once_with(Bucket="products", Key="products/1/photo.webp")
+    assert make_client.call_args.kwargs["endpoint_url"] == "https://storage.example.test"
 
 
 def test_listings(api):
@@ -109,6 +232,7 @@ def test_order_and_items_roll_back_if_an_item_cannot_be_saved(api):
     with Session(engine) as db:
         assert db.scalars(select(Order)).all() == []
         assert db.scalars(select(OrderItem)).all() == []
+        assert db.get(DeliveryWindow, 1).reserved_orders == 0
 
 
 def test_admin_product_endpoints_require_token(api, monkeypatch):
@@ -284,6 +408,349 @@ def test_order_rejects_invalid_coordinates(api, changes):
     assert client.post("/api/orders", json=valid_order() | changes).status_code == 422
     with Session(engine) as db:
         assert db.scalars(select(Order)).all() == []
+
+
+def test_batch_creation_summary_map_and_duplicate_assignment(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    with Session(engine) as db:
+        db.get(Product, 1).net_weight_g = 500
+        db.get(Product, 2).net_weight_g = 1000
+        db.commit()
+    first = client.post("/api/orders", json=valid_order()).json()["id"]
+    second = client.post("/api/orders", json=valid_order() | {"latitude": 47.04, "longitude": 28.86}).json()["id"]
+    body = {"zone_id": 1, "delivery_window_id": 1, "order_ids": [first, second]}
+    assert client.get("/api/admin/batches").status_code == 401
+    assert client.post("/api/admin/batches", json=body).status_code == 401
+    created = client.post("/api/admin/batches", json=body, headers=headers)
+    assert created.status_code == 201
+    batch = created.json()
+    assert batch["storage_type"] == "fresh" and batch["status"] == "planned"
+    assert batch["order_ids"] == [first, second]
+    batch_id = batch["id"]
+    assert client.get(f"/api/admin/batches/{batch_id}", headers=headers).json()["order_ids"] == [first, second]
+    assert client.get(f"/api/admin/batches/{batch_id}/summary", headers=headers).json() == {
+        "batch_id": batch_id, "is_demo": False, "household_count": 2, "total_item_quantity": 6,
+        "total_sales_bani": 160_000, "total_weight_g": 4000, "known_weight_g": 4000,
+    }
+    map_data = client.get("/api/admin/orders/map", params={"batch_id": batch_id}, headers=headers).json()
+    assert map_data["markers"][0]["delivery_batch_id"] == batch_id
+    assert map_data["unlocated"][0]["delivery_batch_id"] == batch_id
+    assert client.post("/api/admin/batches", json=body, headers=headers).status_code == 409
+    assert len(client.get("/api/admin/batches", headers=headers).json()) == 1
+
+
+def test_batch_rejects_incompatible_or_unknown_storage_and_windows(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    with Session(engine) as db:
+        product = db.get(Product, 3)
+        product.available = True
+        product.storage_type = "frozen"
+        db.commit()
+    mixed = valid_order() | {"items": [{"product_id": 1, "quantity": 1}, {"product_id": 3, "quantity": 1}]}
+    mixed_id = client.post("/api/orders", json=mixed).json()["id"]
+    body = {"zone_id": 1, "delivery_window_id": 1, "order_ids": [mixed_id]}
+    assert client.post("/api/admin/batches", json=body, headers=headers).status_code == 400
+
+    order_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    assert client.post("/api/admin/batches", json=body | {"zone_id": 2, "order_ids": [order_id]}, headers=headers).status_code == 400
+    assert client.post("/api/admin/batches", json=body | {"order_ids": [order_id, 999]}, headers=headers).status_code == 400
+    assert client.post("/api/admin/batches", json=body | {"order_ids": [order_id, order_id]}, headers=headers).status_code == 422
+    with Session(engine) as db:
+        item = db.get(OrderItem, (order_id, 1))
+        item.storage_type_snapshot = None
+        db.commit()
+    assert client.post("/api/admin/batches", json=body | {"order_ids": [order_id]}, headers=headers).status_code == 400
+    assert client.get("/api/admin/batches", headers=headers).json() == []
+
+
+def test_batch_uses_order_storage_and_weight_snapshots(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    order_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    with Session(engine) as db:
+        db.get(Product, 1).storage_type = "frozen"
+        db.get(Product, 1).net_weight_g = 500
+        db.commit()
+    response = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [order_id],
+    })
+    assert response.status_code == 201 and response.json()["storage_type"] == "fresh"
+    summary = client.get(f"/api/admin/batches/{response.json()['id']}/summary", headers=headers).json()
+    assert summary["total_weight_g"] is None and summary["known_weight_g"] == 0
+
+
+def test_production_totals_keep_order_units_and_report_unknown_weights(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    with Session(engine) as db:
+        product = db.get(Product, 1)
+        product.net_weight_g = 500
+        product.unit = "pack"
+        db.commit()
+    first_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    with Session(engine) as db:
+        product = db.get(Product, 1)
+        product.net_weight_g = 700
+        product.unit = "piece"
+        db.commit()
+    second_payload = valid_order() | {"items": [{"product_id": 1, "quantity": 2}]}
+    second_id = client.post("/api/orders", json=second_payload).json()["id"]
+    with Session(engine) as db:
+        product = db.get(Product, 1)
+        product.net_weight_g = 5000
+        product.unit = "kg"
+        # Simulate an order created before unit snapshots were introduced.
+        db.get(OrderItem, (first_id, 2)).unit_snapshot = None
+        db.commit()
+    batch = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [first_id, second_id],
+    }).json()
+    path = f"/api/admin/batches/{batch['id']}/production"
+    assert client.get(path).status_code == 401
+    data = client.get(path, headers=headers).json()
+    assert data["batch_id"] == batch["id"]
+    by_product_and_unit = {(row["product_id"], row["unit"]): row for row in data["products"]}
+    assert by_product_and_unit[(1, "pack")]["quantity"] == 2
+    assert by_product_and_unit[(1, "pack")]["total_weight_g"] == 1000
+    assert by_product_and_unit[(1, "piece")]["quantity"] == 2
+    assert by_product_and_unit[(1, "piece")]["total_weight_g"] == 1400
+    assert by_product_and_unit[(2, None)]["quantity"] == 1
+    assert by_product_and_unit[(2, None)]["total_weight_g"] is None
+    assert client.get("/api/admin/batches/999/production", headers=headers).status_code == 404
+
+
+def test_financial_estimates_require_complete_assumptions(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    first_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    second_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    batch_id = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [first_id, second_id],
+    }).json()["id"]
+    path = f"/api/admin/batches/{batch_id}"
+    assert client.get(f"{path}/financial-summary").status_code == 401
+    assert client.patch(f"{path}/costs", json={}).status_code == 401
+    partial = client.get(f"{path}/financial-summary", headers=headers).json()
+    assert partial["estimate_complete"] is False
+    assert partial["revenue_bani"] == 160_000
+    assert partial["estimated_food_cost_bani"] is None
+    assert partial["contribution_before_overhead_bani"] is None
+    assert {item["product_id"] for item in partial["unpriced_products"]} == {1, 2}
+    assert client.patch(f"{path}/costs", headers=headers, json={"estimated_transport_bani": -1}).status_code == 422
+    assert client.patch(f"{path}/costs", headers=headers, json={"estimate_kind": "actual"}).status_code == 422
+
+    with Session(engine) as db:
+        db.get(Product, 1).production_cost_bani = 10_000
+        db.get(Product, 2).production_cost_bani = 2_500
+        db.commit()
+    config = {"estimate_kind": "demo", "estimated_transport_bani": 30_001,
+              "estimated_packaging_per_order_bani": 3_000}
+    assert client.patch(f"{path}/costs", headers=headers, json=config).status_code == 200
+    summary = client.get(f"{path}/financial-summary", headers=headers).json()
+    assert summary["estimate_complete"] is True and summary["estimate_kind"] == "demo"
+    assert summary["estimated_food_cost_bani"] == 45_000
+    assert summary["estimated_packaging_cost_bani"] == 6_000
+    assert summary["delivery_cost_per_household_bani"] == 15_001
+    assert summary["contribution_before_overhead_bani"] == 78_999
+    assert summary["orders_needed_to_cover_transport"] == 1
+    assert summary["transport_break_even_possible"] is True
+    assert summary["unpriced_products"] == []
+
+    with Session(engine) as db:
+        db.get(Product, 1).unit = "piece"
+        db.commit()
+    changed = client.get(f"{path}/financial-summary", headers=headers).json()
+    assert changed["estimate_complete"] is False
+    assert changed["known_food_cost_bani"] == 5_000
+    assert changed["unpriced_products"] == [{"product_id": 1, "reason": "unit_or_weight_changed"}]
+    assert changed["contribution_before_overhead_bani"] is None
+
+
+def test_financial_break_even_for_negative_margin(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    order_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    batch_id = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [order_id],
+    }).json()["id"]
+    with Session(engine) as db:
+        db.get(Product, 1).production_cost_bani = 40_000
+        db.get(Product, 2).production_cost_bani = 1
+        db.commit()
+    path = f"/api/admin/batches/{batch_id}"
+    client.patch(f"{path}/costs", headers=headers, json={"estimate_kind": "operational",
+                 "estimated_transport_bani": 1000, "estimated_packaging_per_order_bani": 0})
+    summary = client.get(f"{path}/financial-summary", headers=headers).json()
+    assert summary["estimate_complete"] is True
+    assert summary["transport_break_even_possible"] is False
+    assert summary["orders_needed_to_cover_transport"] is None
+    assert summary["contribution_before_overhead_bani"] == -1001
+
+
+def test_packing_manifest_and_csv_exports(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    with Session(engine) as db:
+        product = db.get(Product, 1)
+        product.name = "=Preparat"
+        product.net_weight_g = 500
+        db.commit()
+    payload = valid_order() | {"customer_name": "=Test", "address": "=Adresă de test",
+                               "latitude": 47.04, "longitude": 28.86,
+                               "delivery_instructions": "La intrare"}
+    order_id = client.post("/api/orders", json=payload).json()["id"]
+    batch_id = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [order_id],
+    }).json()["id"]
+    path = f"/api/admin/batches/{batch_id}"
+    for endpoint in ("packing-list", "delivery-manifest", "exports/orders.csv", "exports/production.csv"):
+        assert client.get(f"{path}/{endpoint}").status_code == 401
+        assert client.get(f"/api/admin/batches/999/{endpoint}", headers=headers).status_code == 404
+
+    packing = client.get(f"{path}/packing-list", headers=headers).json()
+    assert packing["orders"][0]["order_id"] == order_id
+    items = packing["orders"][0]["items"]
+    assert [(item["product_id"], item["quantity"], item["unit"]) for item in items] == [(1, 2, "pack"), (2, 1, "pack")]
+    assert items[0]["net_weight_g"] == 500
+    stop = client.get(f"{path}/delivery-manifest", headers=headers).json()["stops"][0]
+    assert (stop["address"], stop["latitude"], stop["delivery_instructions"]) == ("=Adresă de test", 47.04, "La intrare")
+
+    response = client.get(f"{path}/exports/orders.csv", headers=headers)
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+    assert "attachment" in response.headers["content-disposition"]
+    order_rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert order_rows[0]["customer_name"] == "'=Test"
+    assert order_rows[0]["address"] == "'=Adresă de test"
+    assert order_rows[0]["phone"].startswith("'+373")
+    assert order_rows[0]["total_bani"] == "80000"
+
+    response = client.get(f"{path}/exports/production.csv", headers=headers)
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows[0]["name"] == "'=Preparat"
+    assert (rows[0]["quantity"], rows[0]["unit"], rows[0]["total_weight_g"]) == ("2", "pack", "1000")
+    assert rows[1]["total_weight_g"] == ""
+
+
+def test_admin_windows_and_capacity_limit(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    now = datetime.now(timezone.utc)
+    payload = {"zone_id": 1, "delivery_at": (now + timedelta(days=4)).isoformat(),
+               "ordering_cutoff": (now + timedelta(days=3)).isoformat(), "capacity": 1}
+    assert client.get("/api/admin/delivery-windows").status_code == 401
+    assert client.post("/api/admin/delivery-windows", json=payload).status_code == 401
+    assert client.post("/api/admin/delivery-windows", headers=headers, json=payload | {"capacity": 0}).status_code == 422
+    assert client.post("/api/admin/delivery-windows", headers=headers, json=payload | {"delivery_at": "2030-01-01T12:00:00"}).status_code == 422
+    created = client.post("/api/admin/delivery-windows", headers=headers, json=payload)
+    assert created.status_code == 201
+    window_id = created.json()["id"]
+    assert created.json()["reserved_orders"] == 0 and created.json()["capacity"] == 1
+    assert created.json()["delivery_at"].endswith("Z")
+    order = valid_order() | {"delivery_window_id": window_id}
+    assert client.post("/api/orders", json=order).status_code == 201
+    assert window_id not in [w["id"] for w in client.get("/api/delivery-windows", params={"zone_id": 1}).json()]
+    assert client.post("/api/orders", json=order).status_code == 400
+    assert client.patch(f"/api/admin/delivery-windows/{window_id}", headers=headers,
+                        json={"delivery_at": (now + timedelta(days=5)).isoformat()}).status_code == 409
+    assert client.patch(f"/api/admin/delivery-windows/{window_id}", headers=headers, json={"capacity": 2}).status_code == 200
+    assert client.post("/api/orders", json=order).status_code == 201
+    assert client.patch(f"/api/admin/delivery-windows/{window_id}", headers=headers, json={"capacity": 1}).status_code == 409
+    assert client.patch(f"/api/admin/delivery-windows/{window_id}", headers=headers, json={"active": False}).status_code == 200
+    assert client.post("/api/orders", json=order).status_code == 400
+    windows = client.get("/api/admin/delivery-windows", params={"zone_id": 1}, headers=headers).json()
+    actual = next(window for window in windows if window["id"] == window_id)
+    assert actual["reserved_orders"] == 2 and actual["active"] is False
+    with Session(engine) as db:
+        assert db.get(DeliveryWindow, window_id).reserved_orders == 2
+
+
+def test_admin_order_status_transitions(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    order_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    path = f"/api/admin/orders/{order_id}/status"
+    assert client.patch(path, json={"status": "confirmed"}).status_code == 401
+    assert client.patch(path, headers=headers, json={"status": "delivered"}).status_code == 409
+    for value in ("confirmed", "packed", "dispatched", "delivered"):
+        response = client.patch(path, headers=headers, json={"status": value})
+        assert response.status_code == 200 and response.json() == {"id": order_id, "status": value}
+    assert client.patch(path, headers=headers, json={"status": "delivered"}).status_code == 200
+    assert client.patch(path, headers=headers, json={"status": "requested"}).status_code == 409
+    assert client.patch(path, headers=headers, json={"status": "cancelled"}).status_code == 422
+
+
+def test_simultaneous_orders_do_not_exceed_window_capacity(api):
+    client, engine = api
+    with Session(engine) as db:
+        db.get(DeliveryWindow, 1).capacity = 1
+        db.commit()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda _: client.post("/api/orders", json=valid_order()), range(2)))
+    assert sorted(response.status_code for response in responses) == [201, 400]
+    with Session(engine) as db:
+        assert len(db.scalars(select(Order)).all()) == 1
+        assert db.get(DeliveryWindow, 1).reserved_orders == 1
+
+
+def test_demo_dataset_is_isolated_batchable_and_resettable(api, monkeypatch):
+    from app.seed_demo_orders import DATASET_KEY, seed_demo
+
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    real_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    with Session(engine, autoflush=False) as db:
+        db.add(DeliveryZone(id=4, city="Chișinău", neighborhood="Rîșcani", active=True))
+        db.commit()
+        assert seed_demo(db) == 50
+        assert seed_demo(db) == 0
+        demo = db.scalars(select(Order).where(Order.demo_dataset_key == DATASET_KEY).order_by(Order.id)).all()
+        assert len(demo) == 50 and all(order.is_demo and order.coordinate_source == "simulated" for order in demo)
+        assert all(order.phone.startswith("DEMO-") and "fictivă" in order.address for order in demo)
+        ids = [order.id for order in demo]
+        window_id = demo[0].delivery_window_id
+        assert db.get(DeliveryWindow, window_id).reserved_orders == 50
+
+    assert client.get("/api/delivery-windows", params={"zone_id": 4}).json() == []
+    assert all(not product["sku"] or not product["sku"].startswith("DEMO-") for product in client.get("/api/products").json())
+    assert client.post("/api/orders", json=valid_order() | {"zone_id": 4, "delivery_window_id": window_id}).status_code == 400
+    map_result = client.get("/api/admin/orders/map", params={"is_demo": True}, headers=headers).json()
+    assert len(map_result["markers"]) == 50 and all(order["is_demo"] for order in map_result["markers"])
+    assert len(client.get("/api/admin/orders/map", params={"is_demo": False}, headers=headers).json()["unlocated"]) == 1
+    assert client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 4, "delivery_window_id": window_id, "order_ids": [ids[0], real_id],
+    }).status_code == 400
+    batch_response = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 4, "delivery_window_id": window_id, "order_ids": ids,
+    })
+    assert batch_response.status_code == 201
+    batch_id = batch_response.json()["id"]
+    assert batch_response.json()["is_demo"] is True
+    assert client.patch(f"/api/admin/batches/{batch_id}/costs", headers=headers, json={"estimate_kind": "operational"}).status_code == 400
+    assert client.patch(f"/api/admin/batches/{batch_id}/costs", headers=headers, json={
+        "estimated_transport_bani": 20_000, "estimated_packaging_per_order_bani": 200,
+    }).status_code == 200
+    summary = client.get(f"/api/admin/batches/{batch_id}/financial-summary", headers=headers).json()
+    assert summary["is_demo"] and summary["estimate_kind"] == "demo" and summary["estimate_complete"]
+    assert summary["household_count"] == 50
+
+    with Session(engine, autoflush=False) as db:
+        assert seed_demo(db, reset=True) == 50
+        assert db.get(Order, real_id) is not None and not db.get(Order, real_id).is_demo
+        assert db.get(DeliveryBatch, batch_id) is None
+        assert len(db.scalars(select(Order).where(Order.demo_dataset_key == DATASET_KEY)).all()) == 50
+        assert db.get(DeliveryWindow, window_id).reserved_orders == 50
 
 
 @pytest.mark.parametrize("changes, expected_status", [
