@@ -18,17 +18,24 @@ def test_seed_is_repeatable_and_replenishes_expired_windows(tmp_path):
         products = db.scalars(select(Product)).all()
         zones = db.scalars(select(DeliveryZone)).all()
         windows = db.scalars(select(DeliveryWindow)).all()
-        assert len(products) == 8
+        assert len(products) == 11
         assert len([product for product in products if product.category == "meal_plan"]) == 2
         frozen = [product for product in products if product.storage_type == "frozen"]
         assert len(frozen) == 2
         assert all(product.demo_only and not product.available for product in frozen)
-        assert {zone.neighborhood for zone in zones} == {"Buiucani", "Botanica"}
-        assert len(windows) == 2
-        assert {window.zone_id for window in windows} == {zone.id for zone in zones}
+        samples = {product.sku: product for product in products if product.sku is not None}
+        assert {sku: product.price_bani for sku, product in samples.items()} == {
+            "CREDEM-SAR-500": 15_000, "CREDEM-ZRA-500": 20_500, "CREDEM-CAR-500": 9_500,
+        }
+        assert all(product.demo_only and not product.available and product.net_weight_g == 500
+                   and product.storage_type == "pending_validation" for product in samples.values())
+        assert {zone.neighborhood for zone in zones} == {"Rîșcani", "Buiucani", "Botanica", "Centru", "Ciocana"}
+        assert [zone.neighborhood for zone in zones if zone.active] == ["Rîșcani"]
+        assert len(windows) == 1
+        assert windows[0].zone_id == next(zone.id for zone in zones if zone.active)
 
         seed(db, now + timedelta(days=10))
         windows = db.scalars(select(DeliveryWindow)).all()
-        assert len(windows) == 4
-        assert len(db.scalars(select(Product)).all()) == 8
+        assert len(windows) == 2
+        assert len(db.scalars(select(Product)).all()) == 11
     engine.dispose()

@@ -12,12 +12,16 @@ source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 python -m alembic upgrade head
 python -m app.seed
+# Set an admin token in the environment before starting the server.
+export ADMIN_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python -m uvicorn app.main:app --reload
 ```
 
 The default database is `sqlite:///./app.db`, relative to the current directory. To use PostgreSQL, set `DATABASE_URL` before running migrations, seeding, and starting the server; `postgres://` and `postgresql://` URLs are supported. `CORS_ORIGINS` is a comma-separated list of allowed browser origins. The sample environment configuration is in `.env.example`. Run all commands from `backend/`.
 
-The seed script is optional and can be run again: it leaves existing products and zones unchanged and creates a future delivery window for a zone if none is currently open for ordering. Seed prices are illustrative. Frozen demonstration products are explicitly marked and are not available for commercial fulfillment.
+Admin routes require `Authorization: Bearer <ADMIN_API_TOKEN>`. Configure a long random secret as an environment variable, keep it out of source control, and use HTTPS when deployed. Without a configured token, admin routes return `503`; missing or incorrect credentials return `401`. This shared token is temporary MVP authentication and does not provide individual accounts or roles.
+
+The seed script is optional and can be run again: it leaves existing products and zone settings unchanged and creates a future delivery window for each active seeded sector if none is currently open for ordering. New installations get Chișinău's five sectors, with Rîșcani active and Buiucani, Botanica, Centru and Ciocana inactive. Migration 0005 also deactivates the previously seeded Buiucani and Botanica sectors; existing orders are retained. Seed prices are illustrative. Frozen demonstration products are explicitly marked and are not available for commercial fulfillment. The three 500 g sample products (sarmale, zraze and potatoes) are demo-only and unavailable for orders; their packaged prices, storage, ingredients, allergens, preparation and shelf life require CREDEM validation.
 
 Interactive API documentation: `http://127.0.0.1:8000/docs`.
 
@@ -33,7 +37,7 @@ Amounts are integer **bani**: 100 bani = 1 MDL. Delivery times and ordering cuto
 
 ### `GET /api/products`
 
-Lists available products. A product marked `demo_only` cannot be ordered, even if it is marked available. Unavailable products are not listed.
+Lists products that are both available and approved (not `demo_only`). Unavailable and demonstration products are not listed.
 
 ```json
 [
@@ -45,18 +49,32 @@ Lists available products. A product marked `demo_only` cannot be ordered, even i
     "price_bani": 65000,
     "storage_type": "fresh",
     "available": true,
-    "demo_only": false
+    "demo_only": false,
+    "sku": null,
+    "product_type": "meal_plan",
+    "unit": "pack",
+    "net_weight_g": null,
+    "preparation_type": null,
+    "ingredients": null,
+    "allergens": null,
+    "shelf_life_days": null,
+    "preparation_instructions": null,
+    "supplier": "CREDEM"
   }
 ]
 ```
 
 ### `GET /api/delivery-zones`
 
-Lists active delivery zones.
+Lists active delivery zones. A subzone is listed only if its parent sector is also active. The existing `neighborhood` field and `name` contain the same zone name.
 
 ```json
 [
-  {"id": 1, "city": "Chișinău", "neighborhood": "Buiucani", "active": true}
+  {
+    "id": 1, "city": "Chișinău", "name": "Rîșcani", "neighborhood": "Rîșcani",
+    "active": true, "parent_zone_id": null, "minimum_basket_bani": 60000,
+    "delivery_fee_bani": 0
+  }
 ]
 ```
 
@@ -86,6 +104,10 @@ Request:
   "address": "Adresă de test",
   "zone_id": 1,
   "delivery_window_id": 1,
+  "latitude": 47.04,
+  "longitude": 28.86,
+  "coordinate_source": "manual_map_pin",
+  "delivery_instructions": "Intrarea de test",
   "items": [
     {"product_id": 1, "quantity": 1}
   ]
@@ -95,15 +117,81 @@ Request:
 Successful response (`201 Created`):
 
 ```json
-{"id": 1, "total_bani": 65000, "status": "requested"}
+{"id": 1, "subtotal_bani": 65000, "delivery_fee_bani": 0, "total_bani": 65000, "status": "requested"}
 ```
 
-The server looks up prices and stores a price snapshot for each item. Prices in the request are ignored. Each product may appear only once; quantities must be whole numbers from 1 to 1000. The minimum total is 60,000 bani (600 MDL). Product availability, demonstration status, active zone, matching window, and cutoff are verified when the order is submitted. The order and all its items are saved atomically.
+The server looks up prices and stores a price snapshot for each item. Prices in the request are ignored. Each product may appear only once; quantities must be whole numbers from 1 to 1000. The zone's minimum applies to the product subtotal before the delivery fee; it defaults to 60,000 bani (600 MDL). Subtotal and delivery fee are saved with each order so later configuration changes do not alter history. Product availability, demonstration status, active zone and parent sector, matching window, and cutoff are verified when the order is submitted. The order and all its items are saved atomically.
+
+Latitude and longitude are optional but must be supplied together and within their geographic ranges. The example coordinates are illustrative, not a real address. A customer pin is stored as `manual_map_pin` and `unverified`; an order without a pin is `unlocated`. A selected zone or pin does not automatically verify the location. Delivery instructions are optional.
 
 Invalid business choices return `400`, for example:
 
 ```json
-{"detail": "Minimum order value is 600 MDL"}
+{"detail": "Minimum basket value is 60000 bani"}
 ```
 
 Missing or malformed fields return `422` with FastAPI validation details. Listing endpoints do not expose customer phone numbers or addresses.
+
+### Admin product endpoints
+
+All require the bearer token. `GET /api/admin/products` lists all products, including inactive and demo products; `POST /api/admin/products` creates one; `PATCH /api/admin/products/{id}` updates supplied fields; `DELETE /api/admin/products/{id}` deactivates it without deleting order history. A missing product returns `404`, and a duplicate SKU returns `409`.
+
+Example `POST /api/admin/products` body:
+
+```json
+{
+  "name": "Sarmale cu pui",
+  "description": "Porție de 500 g; informații în curs de verificare.",
+  "category": "traditional",
+  "price_bani": 15000,
+  "storage_type": "pending_validation",
+  "sku": "CREDEM-SAR-500",
+  "product_type": "individual_dish",
+  "unit": "pack",
+  "net_weight_g": 500,
+  "production_cost_bani": null,
+  "supplier": "CREDEM"
+}
+```
+
+New products default to `available: false` and `demo_only: true`. To make an approved product orderable, update both fields to `true` and `false` respectively. The admin response also contains nullable preparation, ingredient, allergen, shelf-life, and production-cost fields. Production cost is not included in public product responses. Sending `null` in a patch clears nullable fields; required fields cannot be null.
+
+### Admin delivery zone endpoints
+
+All require the bearer token. `GET /api/admin/delivery-zones` lists all zones, including inactive ones; `POST /api/admin/delivery-zones` creates a zone; `PATCH /api/admin/delivery-zones/{id}` changes its settings. New zones default to inactive. `parent_zone_id` may identify a sector in the same city, allowing one level of subzones. A subzone is not eligible when its parent is inactive. Existing orders remain intact if a zone is disabled.
+
+Example `POST /api/admin/delivery-zones` body:
+
+```json
+{
+  "city": "Chișinău",
+  "name": "Rîșcani Nord",
+  "parent_zone_id": 1,
+  "active": true,
+  "minimum_basket_bani": 60000,
+  "delivery_fee_bani": 5000
+}
+```
+
+The returned zone contains its new `id` and the fields shown in the public zone example. Use actual sector IDs from `GET /api/admin/delivery-zones`. Delivery windows must exist for a zone before it can receive orders; admin window management is not implemented yet.
+
+### Admin order map and location review
+
+Both endpoints require the admin bearer token. `GET /api/admin/orders/map` returns two arrays: `markers` (orders with coordinates) and `unlocated` (orders without coordinates). Optional query filters are `city`, `zone_id`, `date` (delivery date in UTC, `YYYY-MM-DD`), `window_id`, `status` (order status), and `location_status` (`unlocated`, `unverified`, `verified`, or `flagged`). Filters apply to both arrays. `delivery_batch_id` is currently always `null`; batching and batch filtering are not yet implemented.
+
+Example response, with illustrative coordinates and address:
+
+```json
+{
+  "markers": [{
+    "id": 1, "address": "Adresă de test", "zone_id": 1, "delivery_window_id": 1,
+    "latitude": 47.04, "longitude": 28.86, "coordinate_source": "manual_map_pin",
+    "location_verification_status": "unverified", "location_review_note": null,
+    "delivery_instructions": null, "total_bani": 65000, "status": "requested",
+    "delivery_batch_id": null
+  }],
+  "unlocated": []
+}
+```
+
+`PATCH /api/admin/orders/{id}/location` updates the coordinates or manual review state. For example, `{"location_verification_status":"flagged", "location_review_note":"Verifică sectorul"}` flags a suspected mismatch for review. An admin can mark a location `verified` after checking it. Updating coordinates requires both values and resets the status to `unverified` unless an explicit status is provided. Send both coordinates as `null` to clear a pin. No geographic boundary checks are implemented.

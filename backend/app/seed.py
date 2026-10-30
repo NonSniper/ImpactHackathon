@@ -57,6 +57,24 @@ PRODUCTS = [
         "category": "side", "price_bani": 9_000, "storage_type": "frozen",
         "available": False, "demo_only": True,
     },
+    {
+        "sku": "CREDEM-SAR-500", "name": "Sarmale cu pui",
+        "description": "Sarmale tradiționale, porție de 500 g. Preț orientativ, neaprobat pentru vânzare.",
+        "category": "traditional", "price_bani": 15_000, "storage_type": "pending_validation",
+        "net_weight_g": 500, "preparation_type": "pending_validation", "available": False, "demo_only": True,
+    },
+    {
+        "sku": "CREDEM-ZRA-500", "name": "Zraze de pui",
+        "description": "Zraze de pui, porție de 500 g. Preț orientativ, neaprobat pentru vânzare.",
+        "category": "meat", "price_bani": 20_500, "storage_type": "pending_validation",
+        "net_weight_g": 500, "preparation_type": "pending_validation", "available": False, "demo_only": True,
+    },
+    {
+        "sku": "CREDEM-CAR-500", "name": "Cartofi cu rozmarin",
+        "description": "Cartofi cu rozmarin, porție de 500 g. Preț orientativ, neaprobat pentru vânzare.",
+        "category": "sides", "price_bani": 9_500, "storage_type": "pending_validation",
+        "net_weight_g": 500, "preparation_type": "pending_validation", "available": False, "demo_only": True,
+    },
 ]
 
 
@@ -67,19 +85,26 @@ def seed(db: Session, now: datetime | None = None) -> None:
     now = now.astimezone(timezone.utc)
 
     for product_data in PRODUCTS:
-        existing = db.scalar(select(Product).where(Product.name == product_data["name"]))
+        if product_data.get("sku") is not None:
+            existing = db.scalar(select(Product).where(Product.sku == product_data["sku"]))
+        else:
+            existing = db.scalar(select(Product).where(Product.name == product_data["name"]))
         if existing is None:
-            db.add(Product(**product_data))
+            db.add(Product(**product_data, product_type=(
+                "meal_plan" if product_data["category"] == "meal_plan" else "individual_dish"
+            )))
 
-    for neighborhood in ("Buiucani", "Botanica"):
+    for neighborhood in ("Rîșcani", "Buiucani", "Botanica", "Centru", "Ciocana"):
         zone = db.scalar(select(DeliveryZone).where(
             DeliveryZone.city == "Chișinău", DeliveryZone.neighborhood == neighborhood
         ))
         if zone is None:
-            zone = DeliveryZone(city="Chișinău", neighborhood=neighborhood, active=True)
+            zone = DeliveryZone(city="Chișinău", neighborhood=neighborhood, active=neighborhood == "Rîșcani")
             db.add(zone)
             db.flush()
 
+        if not zone.active:
+            continue
         existing_window = db.scalar(select(DeliveryWindow).where(
             DeliveryWindow.zone_id == zone.id,
             DeliveryWindow.delivery_at > now,
