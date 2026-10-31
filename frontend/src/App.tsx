@@ -35,6 +35,14 @@ const readCart = (mode: Mode, group: FulfillmentGroup): CartItem[] => {
     return [];
   }
 };
+function FoodImage({ src, alt, fallback }: { src?: string | null; alt: string; fallback: React.ReactNode }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  return src && !failed ? <img src={src} alt={alt} onError={() => setFailed(true)} /> : <>{fallback}</>;
+}
+function FeatureIcon({ name }: { name: "flex" | "price" | "delivery" }) {
+  return <svg className="benefit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{name === "flex" ? <><path d="M4 7h13M14 4l3 3-3 3M20 17H7m3-3-3 3 3 3" /></> : name === "price" ? <><path d="M12 3v18M16 7.5c0-1.5-1.8-2.5-4-2.5S8 6 8 7.5 9.5 10 12 10s4 1 4 3-1.8 3-4 3-4-1-4-3" /></> : <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>}</svg>;
+}
 function Icon({ name }: { name: "bag" | "arrow" | "plus" | "minus" }) {
   return (
     <svg
@@ -65,10 +73,12 @@ function Icon({ name }: { name: "bag" | "arrow" | "plus" | "minus" }) {
 }
 export default function App() {
   const [path, setPath] = useState(location.pathname);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [group, setGroup] = useState<FulfillmentGroup>(() => location.pathname.includes("congelate") ? "frozen" : "meals");
   const navigate = useCallback((url: string) => {
     if (url.includes("congelate")) setGroup("frozen");
     else if (["/planuri", "/catalog", "/familie", "/cos", "/checkout", "/cerere-trimisa"].includes(url)) setGroup("meals");
+    setMenuOpen(false);
     history.pushState({}, "", url);
     setPath(url);
     window.scrollTo(0, 0);
@@ -251,15 +261,16 @@ export default function App() {
             CREDEM <small>HOME</small>
           </span>
         </a>
-        <nav className="nav" aria-label="Navigare principală">
-          <a href="/planuri" onClick={(e) => link(e, "/planuri")}>
+        <button className="mobile-menu-toggle" type="button" aria-expanded={menuOpen} aria-controls="site-navigation" onClick={() => setMenuOpen(open => !open)}>{menuOpen ? "Închide" : "Meniu"}</button>
+        <nav id="site-navigation" className={`nav${menuOpen ? " is-open" : ""}`} aria-label="Navigare principală">
+          <a href="/planuri" aria-current={path === "/planuri" ? "page" : undefined} onClick={(e) => link(e, "/planuri")}>
             Planuri de mese
           </a>
-          <a href="/catalog" onClick={(e) => link(e, "/catalog")}>
+          <a href="/catalog" aria-current={path === "/catalog" ? "page" : undefined} onClick={(e) => link(e, "/catalog")}>
             Construiește cutia
           </a>
-          <a href="/familie" onClick={(e) => link(e, "/familie")}>Meniul familiei</a>
-          <a href="/congelate" onClick={(e) => link(e, "/congelate")}>Congelate</a>
+          <a href="/familie" aria-current={path === "/familie" ? "page" : undefined} onClick={(e) => link(e, "/familie")}>Meniul familiei</a>
+          <a href="/congelate" aria-current={path === "/congelate" ? "page" : undefined} onClick={(e) => link(e, "/congelate")}>Congelate</a>
         </nav>
         <div className="nav-actions">
           <button
@@ -296,90 +307,47 @@ export default function App() {
       <main>
         {path === "/" ? (
           <>
-            <section className="hero">
+            <section className="hero" aria-labelledby="home-title">
               <div className="hero-copy">
-                <p className="hero-intro">Mâncare pentru zile mai ușoare</p>
-                <h1>
-                  Mai mult timp <em>pentru acasă.</em>
-                </h1>
-                <p>
-                  Mese pregătite cu grijă, într-o cutie livrată la momentul
-                  potrivit. Alege un plan sau construiește-ți propriul coș.
-                </p>
+                <h1 id="home-title">Mâncare bună. <em>Mai mult timp pentru familie.</em></h1>
+                <p>Alege preparatele potrivite pentru familia ta și lasă-ne nouă grija meselor.</p>
                 <div className="actions">
-                  <button onClick={() => navigate("/planuri")}>
-                    Descoperă planurile <Icon name="arrow" />
-                  </button>
-                  <button
-                    className="button-light"
-                    onClick={() => navigate("/catalog")}
-                  >
-                    Construiește cutia
-                  </button>
+                  <button onClick={() => navigate("/familie")}>Creează meniul familiei <Icon name="arrow" /></button>
+                  <button className="button-light" onClick={() => navigate("/planuri")}>Descoperă planurile</button>
                 </div>
+                <p className="hero-delivery">Livrare programată, în intervalul ales de tine.</p>
               </div>
-              <div className="hero-art" aria-hidden="true">
-                <div className="art-label">
-                  GUSTUL DE ACASĂ
-                  <br />
-                  <strong>în ritmul tău.</strong>
-                </div>
-                <div className="art-circle">
-                  <span>
-                    CREDEM
-                    <br />
-                    HOME
-                  </span>
-                </div>
-                <div className="art-note">
-                  Mâncare bună.
-                  <br />
-                  Zile mai simple.
-                </div>
+              <div className="hero-art">
+                <img src="/images/examples/sarmale-demo.webp" alt="" />
+                <div className="hero-note"><strong>Mai mult timp împreună.</strong><span>Mese alese pentru zilele tale.</span></div>
+                <small className="hero-credit">Fotografie ilustrativă</small>
               </div>
             </section>
-            <section className="container choice-section">
-              <div className="section-heading">
-                <div>
-                  <h2>Tu alegi cum îți este mai ușor.</h2>
-                  <p>Trei opțiuni, două coșuri și livrări separate. Fiecare comandă are un minim de 600 MDL.</p>
-                </div>
+            <section className="container choice-section" aria-labelledby="categories-title">
+              <div className="section-heading"><div><h2 id="categories-title">2 categorii de produse</h2><p>Două moduri de a aduce mai multă ușurință în fiecare zi.</p></div></div>
+              <div className="category-showcase">
+                <article className="category-panel meals-panel">
+                  <div className="category-panel-heading"><div><span className="category-index">01 / MESE</span><h3>Gata pentru masă.</h3><p>Preparatele tale preferate, pregătite pentru zile mai liniștite.</p></div><figure className="category-photo"><img src="/images/examples/plan-familie-cutii-demo.webp" alt="" /><figcaption>Fotografie ilustrativă</figcaption></figure></div>
+                  <div className="category-options">
+                    <button className="category-option" onClick={() => navigate("/planuri")}><span><strong>Planuri pregătite de noi</strong><small>Pachete pentru 2 sau 3 zile, de la 250 MDL / zi.</small></span><Icon name="arrow" /></button>
+                    <button className="category-option" onClick={() => navigate("/familie")}><span><strong>Meniul familiei</strong><small>Alege preparatele pentru fiecare zi și membru al familiei.</small></span><Icon name="arrow" /></button>
+                  </div>
+                </article>
+                <article className="category-panel frozen-panel">
+                  <span className="category-index">02 / CONGELATE</span>
+                  <div className="frozen-art"><img src="/images/examples/coltunasi-congelati-demo.webp" alt="" /><span>Fotografie ilustrativă</span></div>
+                  <h3>Îți vin în ajutor acasă.</h3>
+                  <p>Produse congelate și semipreparate, gata de pregătit în ritmul tău.</p>
+                  <p className="category-delivery">Coș și livrare separate · minim 600 MDL</p>
+                  <button className="category-link" onClick={() => navigate("/congelate")}>Descoperă congelatele <Icon name="arrow" /></button>
+                </article>
               </div>
-              <div className="choice-grid">
-                <button
-                  className="choice choice-plan"
-                  onClick={() => navigate("/planuri")}
-                >
-                  <span className="choice-mark">2–3 zile</span>
-                  <span>
-                    <strong>Un plan, mai multe mese.</strong>
-                    <small>De la 250 MDL / zi · coșul de mese</small>
-                  </span>
-                  <Icon name="arrow" />
-                </button>
-                <button
-                  className="choice choice-box"
-                  onClick={() => navigate("/familie")}
-                >
-                  <span className="choice-mark">Pe gustul tău</span>
-                  <span>
-                    <strong>Creează meniul familiei.</strong>
-                    <small>Alege preparate pentru fiecare membru · coșul de mese</small>
-                  </span>
-                  <Icon name="arrow" />
-                </button>
-                <button className="choice choice-box" onClick={() => navigate("/congelate")}>
-                  <span className="choice-mark">Coș separat</span><span><strong>Produse congelate și semipreparate</strong><small>Pregătire acasă · minim 600 MDL · livrare separată</small></span><Icon name="arrow" />
-                </button>
+              <div className="benefits" aria-label="Beneficii CREDEM Home">
+                <div><FeatureIcon name="flex" /><h3>Flexibilitate</h3><p>Alegi mesele pentru familia ta.</p></div>
+                <div><FeatureIcon name="price" /><h3>Prețuri transparente</h3><p>Vezi costurile înainte de a trimite cererea.</p></div>
+                <div><FeatureIcon name="delivery" /><h3>Livrare programată</h3><p>Alegi dintre intervalele disponibile.</p></div>
               </div>
-              <div className="how">
-                <h2>Comanzi simplu. Livrăm programat.</h2>
-                <p>
-                  Alege produsele, selectează o zonă și un interval disponibil,
-                  apoi trimite cererea. Echipa CREDEM va verifica și confirma
-                  comanda. Mesele se livrează împreună în condiții refrigerate validate, cu țintă de aproximativ 4°C; congelatele necesită transport separat. Temperaturile și termenul de păstrare se confirmă pentru fiecare produs.
-                </p>
-              </div>
+              <div className="how"><h2>Comanzi simplu. Livrăm programat.</h2><p>Alege produsele, selectează o zonă și un interval disponibil, apoi trimite cererea. Echipa CREDEM o va verifica și confirma. Mesele și congelatele necesită livrări separate; condițiile de păstrare se confirmă pentru fiecare produs.</p></div>
             </section>
           </>
         ) : null}
@@ -445,7 +413,7 @@ export default function App() {
             selectGroup={setGroup}
           />
         )}
-        {path === "/familie" && (loading ? <p className="state">Se încarcă produsele…</p> : error ? <p role="alert" className="error">{error}</p> : <FamilyBuilder products={products.filter(p => p.fulfillment_group === "meals" && p.product_type === "individual_dish" && p.storage_type === "chilled" && p.preparation_level === "ready")} addMenu={addMenu} navigate={navigate} />)}
+        {path === "/familie" && (loading ? <p className="state">Se încarcă produsele…</p> : error ? <p role="alert" className="error">{error}</p> : <FamilyBuilder products={products.filter(p => p.fulfillment_group === "meals" && p.product_type === "individual_dish" && p.storage_type === "chilled" && p.preparation_level === "ready")} addMenu={addMenu} navigate={navigate} cartSubtotal={subtotal} />)}
         {(path === "/cos" || path === "/cos/congelate") && (
           <section className="container page narrow">
             <div className="page-heading">
@@ -511,7 +479,7 @@ export default function App() {
                 <>
                   <p>
                     {result.demo
-                      ? "Aceasta este o demonstrație în browser și nu a fost trimisă către CREDEM."
+                      ? "Aceasta este o demonstrație în browser și nu a fost trimisă către CREDEM. Nu a fost confirmată nicio comandă și nu s-a efectuat nicio plată."
                       : "Îți mulțumim! Echipa CREDEM va verifica cererea. Comanda nu este încă confirmată și nu a fost efectuată nicio plată."}
                   </p>
                   <div className="receipt">
@@ -568,7 +536,7 @@ export default function App() {
             <p>Mâncare pentru acasă, în ritmul tău.</p>
           </div>
           <div>
-            <a href="/catalog" onClick={(e) => link(e, "/catalog")}>
+            <a href="/catalog" aria-current={path === "/catalog" ? "page" : undefined} onClick={(e) => link(e, "/catalog")}>
               Produse
             </a>
             <a href="/admin" onClick={(e) => link(e, "/admin")}>
@@ -600,9 +568,15 @@ function Catalog({
   return (
     <>
       {categories.length > 0 && (
-        <label className="catalog-filter">
+        <div className="catalog-filters">
+        <div className="category-tabs" role="group" aria-label="Categorii produse">
+          <button type="button" aria-pressed={!category} onClick={() => setCategory("")}>Toate</button>
+          {categories.map(value => <button type="button" key={value} aria-pressed={category === value} onClick={() => setCategory(value)}>{value}</button>)}
+        </div>
+        <label className="catalog-filter visually-hidden">
           Categorie
           <select
+            tabIndex={-1}
             value={category}
             onChange={(e) => setCategory(e.target.value)}
           >
@@ -614,6 +588,7 @@ function Catalog({
             ))}
           </select>
         </label>
+        </div>
       )}
       {visible.length ? (
         <div className="product-grid">
@@ -661,16 +636,7 @@ function CatalogCard({
         onClick={() => navigate(`/produs/${p.id}`)}
         aria-label={`Vezi ${p.name}`}
       >
-        {p.image_preview_url ? (
-          <img src={p.image_preview_url} alt="" />
-        ) : (
-          <span className="image-placeholder">
-            <span>CREDEM</span>
-            <small>
-              {mode === "demo" ? "PRODUS ILUSTRATIV" : "FĂRĂ FOTOGRAFIE"}
-            </small>
-          </span>
-        )}
+        <FoodImage src={p.image_preview_url} alt="" fallback={<span className="image-placeholder"><span>CREDEM</span><small>{mode === "demo" ? "PRODUS ILUSTRATIV" : "FĂRĂ FOTOGRAFIE"}</small></span>} />
       </button>
       <div className="product-info">
         {p.image_preview_url?.includes("vegetable-soup.jpg") && <small>Foto ilustrativă: <a href="https://commons.wikimedia.org/wiki/File:Vegetable_soup_and_bread_at_the_office.jpg">JIP</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></small>}
@@ -689,7 +655,7 @@ function CatalogCard({
         {p.fulfillment_group === "frozen" && <p>Păstrare congelată · {p.preparation_instructions || "Verifică instrucțiunile de preparare."}</p>}
         <div className="product-bottom">
           <strong>{money(p.price_bani)}</strong>
-          <label className="catalog-quantity">
+          <div className="catalog-quantity-wrap"><button type="button" className="quantity-adjust" aria-label={`Scade cantitatea pentru ${p.name}`} onClick={() => setQuantity(q => Math.max(1, q - 1))}><Icon name="minus" /></button><label className="catalog-quantity">
             Cantitate
             <input
               aria-label={`Cantitate pentru ${p.name}`}
@@ -704,14 +670,14 @@ function CatalogCard({
                 )
               }
             />
-          </label>
+          </label><button type="button" className="quantity-adjust" aria-label={`Mărește cantitatea pentru ${p.name}`} onClick={() => setQuantity(q => Math.min(1000, q + 1))}><Icon name="plus" /></button></div>
           <button
             className="add-button"
             onClick={() => add(p, quantity)}
             disabled={p.storage_type === "pending_validation"}
             aria-label={`Adaugă ${p.name} în coș`}
           >
-            <Icon name="plus" />
+            <Icon name="plus" /><span>Adaugă</span>
           </button>
         </div>
       </div>
@@ -773,16 +739,14 @@ function ProductDetail({
       ) : (
         <div className="detail-grid">
           <div className="detail-image">
-            {p.image_detail_url ? (
-              <img src={p.image_detail_url} alt={p.name} />
-            ) : (
+            <FoodImage src={p.image_detail_url} alt={p.name} fallback={(
               <span className="image-placeholder">
                 <span>CREDEM</span>
                 <small>
                   {mode === "demo" ? "PRODUS ILUSTRATIV" : "FĂRĂ FOTOGRAFIE"}
                 </small>
               </span>
-            )}
+            )} />
           </div>
           <div>
             {p.image_detail_url?.includes("vegetable-soup.jpg") && <small>Foto ilustrativă: <a href="https://commons.wikimedia.org/wiki/File:Vegetable_soup_and_bread_at_the_office.jpg">JIP</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></small>}
@@ -841,7 +805,7 @@ function ProductDetail({
     </section>
   );
 }
-function FamilyBuilder({ products, addMenu, navigate }: { products: Product[]; addMenu: (a: Allocation[], days: number) => boolean; navigate: (s: string) => void }) {
+function FamilyBuilder({ products, addMenu, navigate, cartSubtotal }: { products: Product[]; addMenu: (a: Allocation[], days: number) => boolean; navigate: (s: string) => void; cartSubtotal: number }) {
   const [days, setDays] = useState(3);
   const [members, setMembers] = useState(["Adult 1"]);
   const [allocations, setAllocations] = useState<Allocation[]>([]);
@@ -859,12 +823,21 @@ function FamilyBuilder({ products, addMenu, navigate }: { products: Product[]; a
   }
   return <section className="container page">
     <div className="page-heading"><div><p className="overline">MENIUL FAMILIEI · COȘ MESE</p><h1>Creează meniul familiei tale</h1><p>Alege preparate pentru fiecare persoană și zi. Toate mesele sosesc într-o singură livrare refrigerată.</p></div></div>
-    <label>Număr de zile <select value={days} onChange={e => { const n = Number(e.target.value); setDays(n); setAllocations(old => old.filter(a => a.day_index <= n)); }}><option value={1}>1 zi</option><option value={2}>2 zile</option><option value={3}>3 zile</option></select></label>
-    <div className="form-stack"><h2>Membrii familiei</h2>{members.map((member, i) => <div key={i}><label>Membru {i + 1}<input value={member} maxLength={60} onChange={e => { const next = e.target.value; setMembers(old => old.map((m, j) => j === i ? next : m)); setAllocations(old => old.map(a => a.member_label === member ? { ...a, member_label: next } : a)); }} /></label>{members.length > 1 && <button type="button" className="text-button" onClick={() => { setMembers(old => old.filter((_, j) => j !== i)); setAllocations(old => old.filter(a => a.member_label !== member)); }}>Elimină membrul și selecțiile</button>}</div>)}<button type="button" className="button-outline" onClick={() => setMembers(old => [...old, `Membru ${old.length + 1}`])}>Adaugă membru</button></div>
+    <div className="family-steps" aria-label="Pașii meniului"><span>1. Perioada</span><span>2. Familia</span><span>3. Preparatele</span><span>4. Rezumat</span></div>
+    <section className="family-setup"><h2>1. Alege perioada</h2><p>Alege pentru câte zile pregătim meniul.</p><label>Număr de zile <select value={days} onChange={e => { const n = Number(e.target.value); setDays(n); setAllocations(old => old.filter(a => a.day_index <= n)); }}><option value={1}>1 zi</option><option value={2}>2 zile</option><option value={3}>3 zile</option></select></label></section>
+    <div className="form-stack family-setup"><h2>2. Adaugă membrii familiei</h2><p>Fiecare persoană își poate avea propriile preparate.</p>{members.map((member, i) => <div key={i}><label>Membru {i + 1}<input value={member} maxLength={60} onChange={e => { const next = e.target.value; setMembers(old => old.map((m, j) => j === i ? next : m)); setAllocations(old => old.map(a => a.member_label === member ? { ...a, member_label: next } : a)); }} /></label>{members.length > 1 && <button type="button" className="text-button" onClick={() => { setMembers(old => old.filter((_, j) => j !== i)); setAllocations(old => old.filter(a => a.member_label !== member)); }}>Elimină membrul și selecțiile</button>}</div>)}<button type="button" className="button-outline" onClick={() => setMembers(old => [...old, `Membru ${old.length + 1}`])}>Adaugă membru</button></div>
+    <div className="family-section-heading"><h2>3. Alege preparatele</h2><p>Adaugă porții pentru fiecare persoană și zi.</p></div>
     {!products.length && <p>Nu sunt preparate compatibile disponibile în acest moment.</p>}
-    {Array.from({ length: days }, (_, index) => index + 1).map(day => <section className="admin-section" key={day}><h2>Ziua {day}</h2>{members.map((member, index) => <div className="detail-panel" key={index}><h3>{member || `Membru ${index + 1}`}</h3>{allocations.filter(a => a.day_index === day && a.member_label === member).map((a, i) => <p key={`${a.product_id}-${i}`}>{products.find(p => p.id === a.product_id)?.name || `Produs #${a.product_id}`} <label>Cantitate <input type="number" min="1" max="1000" step="1" value={a.quantity} onChange={e => setAllocations(old => old.map(item => item === a ? { ...item, quantity: Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value)) || 1)) } : item))} /></label> <button className="text-button" type="button" onClick={() => setAllocations(old => old.filter(item => item !== a))}>Elimină</button></p>)}<label>Preparat<select value={selected[`${day}-${member}`] || ""} onChange={e => setSelected({ ...selected, [`${day}-${member}`]: e.target.value })}><option value="">Alege preparatul</option>{products.map(p => <option value={p.id} key={p.id}>{p.name} · {money(p.price_bani)}</option>)}</select></label><button type="button" disabled={!products.length} onClick={() => add(day, member)}>Adaugă o porție</button></div>)}</section>)}
-    <section className="cart-summary"><h2>Rezumat</h2><p>{days} zile · {members.length} membri · {allocations.reduce((n, a) => n + a.quantity, 0)} porții</p>{Object.entries(totals).map(([id, q]) => <p key={id}>{products.find(p => p.id === Number(id))?.name}: {q}</p>)}<strong>{money(cost)}</strong><p>Minimul comenzii de mese este 600 MDL; congelatele se comandă separat.</p>{error && <p role="alert" className="error">{error}</p>}<button type="button" onClick={() => { if (!allocations.length || members.some(m => !m.trim()) || new Set(members.map(m => m.trim())).size !== members.length) { setError("Adaugă preparate și etichete distincte pentru membrii familiei."); return; } if (addMenu(allocations, days)) navigate("/cos"); }}>Adaugă meniul în coș</button></section>
+    {Array.from({ length: days }, (_, index) => index + 1).map(day => <section className="admin-section family-day" key={day}><h2>Ziua {day}</h2><p>Subtotal zi: {money(allocations.filter(a => a.day_index === day).reduce((sum, a) => sum + (products.find(p => p.id === a.product_id)?.price_bani || 0) * a.quantity, 0))}</p>{members.map((member, index) => <div className="detail-panel" key={index}><h3>{member || `Membru ${index + 1}`}</h3>{allocations.filter(a => a.day_index === day && a.member_label === member).map((a, i) => <p key={`${a.product_id}-${i}`}>{products.find(p => p.id === a.product_id)?.name || `Produs #${a.product_id}`} <label>Cantitate <input type="number" min="1" max="1000" step="1" value={a.quantity} onChange={e => setAllocations(old => old.map(item => item === a ? { ...item, quantity: Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value)) || 1)) } : item))} /></label> <button className="text-button" type="button" onClick={() => setAllocations(old => old.filter(item => item !== a))}>Elimină</button></p>)}<FamilyMealPreview product={products.find(p => p.id === Number(selected[`${day}-${member}`])) || products[0]} /><label>Preparat<select value={selected[`${day}-${member}`] || ""} onChange={e => setSelected({ ...selected, [`${day}-${member}`]: e.target.value })}><option value="">Alege preparatul</option>{products.map(p => <option value={p.id} key={p.id}>{p.name} · {money(p.price_bani)}</option>)}</select></label><button type="button" disabled={!products.length} onClick={() => add(day, member)}>Adaugă o porție</button></div>)}</section>)}
+    <section className="cart-summary family-summary"><h2>4. Verifică meniul</h2><p>{days} zile · {members.length} membri · {allocations.reduce((n, a) => n + a.quantity, 0)} porții</p>{Object.entries(totals).map(([id, q]) => <p key={id}>{products.find(p => p.id === Number(id))?.name}: {q}</p>)}<p>Meniu: {money(cost)} · Subtotal coș estimat: {money(cartSubtotal + cost)}</p><strong>{money(cartSubtotal + cost)}</strong><p>Mai ai nevoie de {money(Math.max(0, 60000 - cartSubtotal - cost))} pentru minimul de 600 MDL al coșului de mese. Congelatele se comandă separat.</p>{error && <p role="alert" className="error">{error}</p>}<button type="button" onClick={() => { if (!allocations.length || members.some(m => !m.trim()) || new Set(members.map(m => m.trim())).size !== members.length) { setError("Adaugă preparate și etichete distincte pentru membrii familiei."); return; } if (addMenu(allocations, days)) navigate("/cos"); }}>Adaugă meniul în coș</button></section>
   </section>;
+}
+function FamilyMealPreview({ product }: { product?: Product }) {
+  if (!product) return null;
+  return <figure className="family-meal-preview">
+    <FoodImage src={product.image_preview_url} alt={`Fotografie ilustrativă: ${product.name}`} fallback={<div className="family-meal-placeholder" aria-hidden="true">CREDEM</div>} />
+    <figcaption><strong>{product.name}</strong><span>{money(product.price_bani)} · fotografie ilustrativă</span>{product.image_preview_url?.includes("vegetable-soup.jpg") && <small>Foto: <a href="https://commons.wikimedia.org/wiki/File:Vegetable_soup_and_bread_at_the_office.jpg">JIP</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></small>}</figcaption>
+  </figure>;
 }
 function Cart({
   cart,
@@ -889,11 +862,7 @@ function Cart({
         {cart.map(({ product: p, quantity: q, allocations }) => (
           <div className="cart-row" key={p.id}>
             <div className="cart-thumb">
-              {p.image_preview_url ? (
-                <img src={p.image_preview_url} alt="" />
-              ) : (
-                <span>C</span>
-              )}
+              <FoodImage src={p.image_preview_url} alt="" fallback={<span>C</span>} />
             </div>
             <div className="cart-description">
               <strong>{p.name}</strong>
@@ -944,7 +913,7 @@ function Cart({
     <div className="state empty">
       <h2>Coșul tău este gol.</h2>
       <p>Descoperă produsele și alege ce ți se potrivește.</p>
-      <button onClick={() => navigate("/catalog")}>Explorează produsele</button>
+      <button onClick={() => navigate(group === "frozen" ? "/congelate" : "/catalog")}>Explorează produsele</button>
     </div>
   );
 }
@@ -1175,7 +1144,7 @@ function Checkout({
       {!cart.length ? (
         <div className="state empty">
           <p>Coșul este gol.</p>
-          <button onClick={() => navigate("/catalog")}>Vezi produsele</button>
+          <button onClick={() => navigate(group === "frozen" ? "/congelate" : "/catalog")}>Vezi produsele</button>
         </div>
       ) : (
         <form className="checkout-layout" onSubmit={submit}>

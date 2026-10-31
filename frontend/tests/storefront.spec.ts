@@ -175,6 +175,25 @@ test("meals and frozen carts have independent minimums and persist", async ({ pa
   expect(data.posts).toBe(0);
 });
 
+test("frozen demo products show their photos and use the frozen cart", async ({ page }) => {
+  await mockPublic(page, state());
+  await page.goto("/");
+  await page.getByRole("button", { name: "Încearcă demo" }).click();
+  await page.goto("/congelate");
+  for (const [name, image] of [
+    ["Colțunași", "coltunasi-congelati-demo.webp"],
+    ["Legume congelate", "legume-congelate-demo.webp"],
+    ["Chiftele de pui congelate", "chiftele-congelate-demo.webp"],
+    ["Ardei umpluți congelați", "ardei-congelati-demo.webp"],
+    ["Clătite cu brânză congelate", "clatite-congelate-demo.webp"],
+  ]) {
+    const card = page.getByRole("button", { name: `Vezi ${name}`, exact: true });
+    await expect(card.locator("img")).toHaveAttribute("src", `/images/examples/${image}`);
+  }
+  await page.getByRole("button", { name: "Adaugă Chiftele de pui congelate în coș" }).click();
+  await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toHaveAttribute("href", "/cos/congelate");
+});
+
 test("each group retains its own confirmation after separate orders", async ({ page }) => {
   const data = state();
   await mockPublic(page, data);
@@ -206,6 +225,20 @@ test("a frozen product direct link selects the correct cart after refresh", asyn
   await page.reload();
   await page.getByRole("button", { name: "Adaugă în coș", exact: true }).click();
   await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toHaveAttribute("href", "/cos/congelate");
+});
+
+test("family builder previews the selected dish photo", async ({ page }) => {
+  const data = state();
+  data.products = [
+    { ...product, id: 10, name: "Supă test", product_type: "individual_dish", plan_duration_days: null, image_preview_url: "/images/examples/vegetable-soup.jpg" },
+    { ...product, id: 11, name: "Sarmale test", product_type: "individual_dish", plan_duration_days: null, image_preview_url: "/images/examples/sarmale-demo.webp" },
+  ];
+  await mockPublic(page, data);
+  await page.goto("/familie");
+  const day = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ziua 1", exact: true }) }).last();
+  await expect(day.getByAltText("Fotografie ilustrativă: Supă test")).toBeVisible();
+  await day.getByLabel("Preparat").selectOption("11");
+  await expect(day.getByAltText("Fotografie ilustrativă: Sarmale test")).toHaveAttribute("src", "/images/examples/sarmale-demo.webp");
 });
 
 test("family allocations reach checkout as metadata on one aggregate item", async ({ page }) => {
