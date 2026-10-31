@@ -1,0 +1,18 @@
+# CREDEM Home frontend
+
+React, TypeScript and Vite storefront and administration interface.
+
+```sh
+cd frontend
+npm install
+npm run dev
+npm run build
+```
+
+The development server proxies `/api` to `http://127.0.0.1:8000`. For a separately hosted backend, set `VITE_API_URL` to the API origin without `/api`; never put an admin token or another secret in a `VITE_` variable. See `backend/README.md` for backend setup and the authoritative API contract.
+
+The live catalog shows only approved, available backend products. Freshly seeded illustrative products are intentionally unavailable. The storefront's **Încearcă demo** control uses fictional browser-only products and session-only simulated requests. It does not send them to the API. Backend `is_demo` orders are a separate dataset visible in the admin interface after an administrator runs the backend's demo seed.
+
+Open `/admin` and enter the backend's shared bearer token. The token is kept in page memory and must be entered again after a reload. This is temporary supervised-demo authentication, not a production login system. Orders are requests, not payments. Delivery location markers require manual review; the map does not verify zones or optimize routes.
+
+For integration tests use a new isolated database, configure a temporary admin token, and create an explicitly test-only approved product with fictional customer data. Do not approve seeded illustrative products for commercial use. PostgreSQL and real object storage require separate environment-specific verification.
