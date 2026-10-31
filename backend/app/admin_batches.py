@@ -10,6 +10,7 @@ from app.schemas import (BatchCostConfig, BatchCostUpdate, DeliveryBatchCreate, 
                          DeliveryBatchRead, DeliveryBatchSummary, FinancialSummary, ProductionProductTotal,
                          ProductionTotals, UnpricedProduct)
 from app.security import require_admin
+from app.storage_rules import compatible_storage_type
 
 router = APIRouter(prefix="/api/admin/batches", tags=["admin batches"], dependencies=[Depends(require_admin)])
 BATCHABLE_STATUSES = ("requested", "confirmed", "packed")
@@ -47,11 +48,11 @@ def create_batch(payload: DeliveryBatchCreate, db: Annotated[Session, Depends(ge
     items = db.scalars(select(OrderItem).where(OrderItem.order_id.in_(payload.order_ids))).all()
     if {item.order_id for item in items} != set(payload.order_ids):
         raise HTTPException(status_code=400, detail="Every order must contain items")
-    storage_types = {item.storage_type_snapshot for item in items}
-    if len(storage_types) != 1 or not storage_types.issubset({"fresh", "chilled", "frozen"}):
+    storage_type = compatible_storage_type(item.storage_type_snapshot for item in items)
+    if storage_type is None:
         raise HTTPException(status_code=400, detail="Order items require one known, compatible storage type")
 
-    batch = DeliveryBatch(zone_id=payload.zone_id, delivery_window_id=window.id, storage_type=storage_types.pop(),
+    batch = DeliveryBatch(zone_id=payload.zone_id, delivery_window_id=window.id, storage_type=storage_type,
                           is_demo=window.is_demo, estimate_kind="demo" if window.is_demo else None)
     try:
         db.add(batch)

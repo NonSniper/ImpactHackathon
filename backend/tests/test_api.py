@@ -220,6 +220,58 @@ def test_order_at_minimum_is_accepted(api):
     assert response.json()["total_bani"] == 60_000
 
 
+@pytest.mark.parametrize("first_type,second_type", [
+    ("fresh", "frozen"), ("fresh", "chilled"), ("chilled", "frozen"),
+])
+def test_order_rejects_mixed_storage_without_reserving_capacity(api, first_type, second_type):
+    client, engine = api
+    with Session(engine) as db:
+        db.get(Product, 1).storage_type = first_type
+        db.get(Product, 2).storage_type = second_type
+        db.commit()
+    response = client.post("/api/orders", json=valid_order())
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Products with different storage types must be ordered separately"
+    with Session(engine) as db:
+        assert db.scalars(select(Order)).all() == []
+        assert db.scalars(select(OrderItem)).all() == []
+        assert db.get(DeliveryWindow, 1).reserved_orders == 0
+
+
+@pytest.mark.parametrize("include_other_product", [False, True])
+def test_order_rejects_unvalidated_storage_without_reserving_capacity(api, include_other_product):
+    client, engine = api
+    with Session(engine) as db:
+        db.get(Product, 1).storage_type = "pending_validation"
+        db.commit()
+    payload = valid_order()
+    if not include_other_product:
+        payload["items"] = [{"product_id": 1, "quantity": 2}]
+    response = client.post("/api/orders", json=payload)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "One or more products have unvalidated storage requirements"
+    with Session(engine) as db:
+        assert db.scalars(select(Order)).all() == []
+        assert db.get(DeliveryWindow, 1).reserved_orders == 0
+
+
+@pytest.mark.parametrize("storage_type", ["fresh", "chilled", "frozen"])
+def test_order_with_one_storage_type_can_be_batched(api, monkeypatch, storage_type):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    with Session(engine) as db:
+        db.get(Product, 1).storage_type = storage_type
+        db.get(Product, 2).storage_type = storage_type
+        db.commit()
+    order = client.post("/api/orders", json=valid_order())
+    assert order.status_code == 201
+    batch = client.post("/api/admin/batches", headers={"Authorization": "Bearer test-secret"}, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [order.json()["id"]],
+    })
+    assert batch.status_code == 201
+    assert batch.json()["storage_type"] == storage_type
+
+
 def test_order_and_items_roll_back_if_an_item_cannot_be_saved(api):
     client, engine = api
     with engine.begin() as connection:
@@ -399,6 +451,52 @@ def test_order_map_filters_and_manual_location_review(api, monkeypatch):
     assert client.patch(f"/api/admin/orders/{located_id}/location", headers=headers, json={"latitude": 47}).status_code == 422
 
 
+def test_admin_order_list_and_detail_before_and_after_batching(api, monkeypatch):
+    client, engine = api
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
+    headers = {"Authorization": "Bearer test-secret"}
+    first_id = client.post("/api/orders", json=valid_order()).json()["id"]
+    second_id = client.post("/api/orders", json=valid_order() | {"customer_name": "Maria"}).json()["id"]
+    with Session(engine) as db:
+        product = db.get(Product, 1)
+        product.name = "Renamed meal"
+        product.price_bani = 99_000
+        db.commit()
+
+    for path in ("/api/admin/orders", f"/api/admin/orders/{first_id}"):
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/api/admin/orders/9999", headers=headers).status_code == 404
+    detail = client.get(f"/api/admin/orders/{first_id}", headers=headers)
+    assert detail.status_code == 200
+    body = detail.json()
+    assert (body["customer_name"], body["phone"], body["address"]) == ("Ana", "+373 600 00000", "Test street 1")
+    assert body["delivery_batch_id"] is None and body["status"] == "requested"
+    assert body["total_bani"] == 80_000 and body["created_at"].endswith("Z") and body["delivery_at"].endswith("Z")
+    assert body["items"][0] == {
+        "product_id": 1, "product_name": "Renamed meal", "product_sku": None, "quantity": 2,
+        "unit_price_bani": 35_000, "line_total_bani": 70_000, "storage_type_snapshot": "fresh",
+        "net_weight_g_snapshot": None, "unit_snapshot": "pack",
+    }
+    listing = client.get("/api/admin/orders", headers=headers).json()
+    assert [item["id"] for item in listing] == [second_id, first_id]
+    assert "phone" not in listing[0] and "address" not in listing[0]
+    assert client.get("/api/admin/orders", params={"limit": 1, "offset": 1}, headers=headers).json()[0]["id"] == first_id
+    assert client.get("/api/admin/orders", params={"limit": 101}, headers=headers).status_code == 422
+    assert [item["id"] for item in client.get("/api/admin/orders", params={"zone_id": 1, "window_id": 1,
+                 "status": "requested", "is_demo": False, "unbatched": True}, headers=headers).json()] == [second_id, first_id]
+    assert client.get("/api/admin/orders", params={"zone_id": 2}, headers=headers).json() == []
+    assert client.get("/api/admin/orders", params={"is_demo": True}, headers=headers).json() == []
+
+    batch = client.post("/api/admin/batches", headers=headers, json={
+        "zone_id": 1, "delivery_window_id": 1, "order_ids": [first_id],
+    }).json()
+    assert [item["id"] for item in client.get("/api/admin/orders", params={"unbatched": True}, headers=headers).json()] == [second_id]
+    assert [item["id"] for item in client.get("/api/admin/orders", params={"batch_id": batch["id"]}, headers=headers).json()] == [first_id]
+    assert client.get(f"/api/admin/orders/{first_id}", headers=headers).json()["delivery_batch_id"] == batch["id"]
+    assert client.get("/api/admin/orders/map", headers=headers).status_code == 200
+
+
 @pytest.mark.parametrize("changes", [
     {"latitude": 47.0}, {"longitude": 28.0}, {"latitude": 91, "longitude": 28},
     {"latitude": 47, "longitude": -181}, {"coordinate_source": "manual_map_pin"},
@@ -445,13 +543,11 @@ def test_batch_rejects_incompatible_or_unknown_storage_and_windows(api, monkeypa
     client, engine = api
     monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
     headers = {"Authorization": "Bearer test-secret"}
+    mixed_id = client.post("/api/orders", json=valid_order()).json()["id"]
     with Session(engine) as db:
-        product = db.get(Product, 3)
-        product.available = True
-        product.storage_type = "frozen"
+        # Simulate an older order accepted before checkout enforced storage compatibility.
+        db.get(OrderItem, (mixed_id, 2)).storage_type_snapshot = "frozen"
         db.commit()
-    mixed = valid_order() | {"items": [{"product_id": 1, "quantity": 1}, {"product_id": 3, "quantity": 1}]}
-    mixed_id = client.post("/api/orders", json=mixed).json()["id"]
     body = {"zone_id": 1, "delivery_window_id": 1, "order_ids": [mixed_id]}
     assert client.post("/api/admin/batches", json=body, headers=headers).status_code == 400
 
@@ -728,6 +824,10 @@ def test_demo_dataset_is_isolated_batchable_and_resettable(api, monkeypatch):
     map_result = client.get("/api/admin/orders/map", params={"is_demo": True}, headers=headers).json()
     assert len(map_result["markers"]) == 50 and all(order["is_demo"] for order in map_result["markers"])
     assert len(client.get("/api/admin/orders/map", params={"is_demo": False}, headers=headers).json()["unlocated"]) == 1
+    demo_orders = client.get("/api/admin/orders", params={"is_demo": True}, headers=headers).json()
+    assert len(demo_orders) == 50 and all(order["is_demo"] for order in demo_orders)
+    assert [order["id"] for order in client.get("/api/admin/orders", params={"is_demo": False}, headers=headers).json()] == [real_id]
+    assert client.get(f"/api/admin/orders/{ids[0]}", headers=headers).json()["is_demo"] is True
     assert client.post("/api/admin/batches", headers=headers, json={
         "zone_id": 4, "delivery_window_id": window_id, "order_ids": [ids[0], real_id],
     }).status_code == 400

@@ -21,7 +21,15 @@ The default database is `sqlite:///./app.db`, relative to the current directory.
 
 Admin routes require `Authorization: Bearer <ADMIN_API_TOKEN>`. Configure a long random secret as an environment variable, keep it out of source control, and use HTTPS when deployed. Without a configured token, admin routes return `503`; missing or incorrect credentials return `401`. This shared token is temporary MVP authentication and does not provide individual accounts or roles.
 
-The seed script is optional and can be run again: it leaves existing products and zone settings unchanged and creates a future delivery window for each active seeded sector if none is currently open for ordering. New installations get Chișinău's five sectors, with Rîșcani active and Buiucani, Botanica, Centru and Ciocana inactive. Migration 0005 also deactivates the previously seeded Buiucani and Botanica sectors; existing orders are retained. Seed prices are illustrative. Frozen demonstration products are explicitly marked and are not available for commercial fulfillment. The three 500 g sample products (sarmale, zraze and potatoes) are demo-only and unavailable for orders; their packaged prices, storage, ingredients, allergens, preparation and shelf life require CREDEM validation.
+The seed script is optional and can be run again: it leaves existing products and zone settings unchanged and creates a future delivery window for each active seeded sector if none is currently open for ordering. New installations get Chișinău's five sectors, with Rîșcani active and Buiucani, Botanica, Centru and Ciocana inactive. Migration 0005 also deactivates the previously seeded Buiucani and Botanica sectors; existing orders are retained. All newly seeded products have illustrative prices, are `demo_only: true` and `available: false`, and cannot be commercially ordered. The public catalog is empty until an administrator adds or approves real products after CREDEM validates their details. The admin product listing and simulated-order dataset remain available for demonstration.
+
+**Existing databases:** older seed versions created six illustrative products as orderable. Running the updated seed does not modify them or prove whether they were later approved. Before accepting real orders, review the admin product list and run this read-only check from `backend/`:
+
+```bash
+python -m app.audit_seed_products
+```
+
+It prints IDs, names, prices and availability flags for exact matches to the six old seed names; renamed products are not detected, and a name match is not proof of origin or approval. Review such products and any renamed or other unapproved items manually. For each unapproved product, an authenticated admin can send `PATCH /api/admin/products/{id}` with `{"available": false, "demo_only": true}`. Do not reactivate products until CREDEM has validated them. Existing products and order history are not changed automatically.
 
 Interactive API documentation: `http://127.0.0.1:8000/docs`.
 
@@ -43,8 +51,8 @@ Lists products that are both available and approved (not `demo_only`). Unavailab
 [
   {
     "id": 1,
-    "name": "Plan de mese pentru 3 zile — clasic",
-    "description": "Plan demonstrativ de mese pentru trei zile. Preț ilustrativ.",
+    "name": "Produs aprobat — exemplu de răspuns",
+    "description": "Exemplu de structură pentru un produs aprobat de administrator.",
     "category": "meal_plan",
     "price_bani": 65000,
     "storage_type": "fresh",
@@ -64,6 +72,8 @@ Lists products that are both available and approved (not `demo_only`). Unavailab
   }
 ]
 ```
+
+The JSON above only illustrates the response shape; it is not an approval of any real product or price. A freshly seeded catalog returns `[]`.
 
 `GET /api/products/{id}` returns the same information plus `image_detail_url`. It only returns available, approved products; other IDs return `404`. Both image URLs can be `null`.
 
@@ -139,6 +149,8 @@ Successful response (`201 Created`):
 
 The server looks up prices and stores a price snapshot for each item. Prices in the request are ignored. Each product may appear only once; quantities must be whole numbers from 1 to 1000. The zone's minimum applies to the product subtotal before the delivery fee; it defaults to 60,000 bani (600 MDL). Subtotal and delivery fee are saved with each order so later configuration changes do not alter history. Product availability, demonstration status, active zone and parent sector, matching window, and cutoff are verified when the order is submitted. The order and all its items are saved atomically.
 
+Every item in an order must have the same validated storage type: `fresh`, `chilled`, or `frozen`. Different types currently require separate orders; each order must meet the zone minimum. Products with `pending_validation` cannot be ordered. Rejected requests do not reserve delivery-window capacity. Existing orders are not changed; older mixed or unknown storage snapshots may still require manual review before batching.
+
 Latitude and longitude are optional but must be supplied together and within their geographic ranges. The example coordinates are illustrative, not a real address. A customer pin is stored as `manual_map_pin` and `unverified`; an order without a pin is `unlocated`. A selected zone or pin does not automatically verify the location. Delivery instructions are optional.
 
 Invalid business choices return `400`, for example:
@@ -191,6 +203,35 @@ Example `POST /api/admin/delivery-zones` body:
 ```
 
 The returned zone contains its new `id` and the fields shown in the public zone example. Use actual sector IDs from `GET /api/admin/delivery-zones`. Delivery windows must exist for a zone before it can receive orders.
+
+### Admin order list and details
+
+Both endpoints require the admin bearer token. `GET /api/admin/orders` lists newest orders first, including unbatched orders. Optional filters: `zone_id`, `window_id`, `batch_id`, `status`, `is_demo` and `unbatched=true`. `limit` defaults to 50 (maximum 100); `offset` defaults to 0. Without an `is_demo` filter, both real and simulated orders are included and labeled.
+
+Example `GET /api/admin/orders?unbatched=true&is_demo=false` response:
+
+```json
+[{"id": 1, "customer_name": "Client Test", "zone_id": 1, "delivery_window_id": 1,
+  "delivery_at": "2026-11-02T12:00:00Z", "delivery_batch_id": null,
+  "subtotal_bani": 65000, "delivery_fee_bani": 0, "total_bani": 65000,
+  "status": "requested", "created_at": "2026-10-30T12:00:00Z", "is_demo": false}]
+```
+
+`GET /api/admin/orders/{id}` returns those fields plus phone, address, location, instructions and ordered items, even before the order is batched. Example:
+
+```json
+{"id": 1, "customer_name": "Client Test", "phone": "+37360000000", "address": "Adresă de test",
+ "zone_id": 1, "delivery_window_id": 1, "delivery_at": "2026-11-02T12:00:00Z",
+ "delivery_batch_id": null, "subtotal_bani": 65000, "delivery_fee_bani": 0, "total_bani": 65000,
+ "status": "requested", "created_at": "2026-10-30T12:00:00Z", "is_demo": false,
+ "latitude": null, "longitude": null, "coordinate_source": null,
+ "location_verification_status": "unlocated", "location_review_note": null, "delivery_instructions": null,
+ "items": [{"product_id": 1, "product_name": "Plan de mese", "product_sku": null, "quantity": 1,
+            "unit_price_bani": 65000, "line_total_bani": 65000, "storage_type_snapshot": "fresh",
+            "net_weight_g_snapshot": null, "unit_snapshot": "pack"}]}
+```
+
+The item price, storage type, weight and unit are order snapshots. Product names and SKUs come from the current catalog and may change; older orders can have null storage, weight or unit snapshots. Unknown order IDs return `404`. Customer contact details are returned only by authenticated admin endpoints.
 
 ### Admin order map and location review
 

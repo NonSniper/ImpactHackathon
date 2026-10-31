@@ -295,6 +295,50 @@ class AdminMapResponse(BaseModel):
     unlocated: list[AdminMapOrder]
 
 
+class AdminOrderSummary(BaseModel):
+    id: int
+    customer_name: str
+    zone_id: int
+    delivery_window_id: int
+    delivery_at: datetime
+    delivery_batch_id: int | None
+    subtotal_bani: int
+    delivery_fee_bani: int
+    total_bani: int
+    status: str
+    created_at: datetime
+    is_demo: bool
+
+    @field_validator("delivery_at", "created_at")
+    @classmethod
+    def utc_timestamps(cls, value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+class AdminOrderItem(BaseModel):
+    product_id: int
+    product_name: str | None
+    product_sku: str | None
+    quantity: int
+    unit_price_bani: int
+    line_total_bani: int
+    storage_type_snapshot: str | None
+    net_weight_g_snapshot: int | None
+    unit_snapshot: str | None
+
+
+class AdminOrderDetail(AdminOrderSummary):
+    phone: str
+    address: str
+    latitude: float | None
+    longitude: float | None
+    coordinate_source: str | None
+    location_verification_status: str
+    location_review_note: str | None
+    delivery_instructions: str | None
+    items: list[AdminOrderItem]
+
+
 class DeliveryBatchCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

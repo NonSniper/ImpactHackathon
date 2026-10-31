@@ -18,6 +18,7 @@ from app.admin_zones import is_zone_active, router as admin_zones_router
 from app.database import get_db
 from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product
 from app.schemas import DeliveryWindowRead, DeliveryZoneRead, OrderCreate, OrderCreated, ProductRead, ProductDetailRead
+from app.storage_rules import DELIVERABLE_STORAGE_TYPES, compatible_storage_type
 
 load_dotenv()
 app = FastAPI(title="CREDEM Home API", version="0.1.0")
@@ -115,6 +116,12 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
     if any(product_id not in products or not products[product_id].available or products[product_id].demo_only
            for product_id in product_ids):
         raise HTTPException(status_code=400, detail="One or more products are unavailable for ordering")
+
+    storage_types = {products[product_id].storage_type for product_id in product_ids}
+    if not storage_types.issubset(DELIVERABLE_STORAGE_TYPES):
+        raise HTTPException(status_code=400, detail="One or more products have unvalidated storage requirements")
+    if compatible_storage_type(storage_types) is None:
+        raise HTTPException(status_code=400, detail="Products with different storage types must be ordered separately")
 
     subtotal_bani = sum(products[item.product_id].price_bani * item.quantity for item in payload.items)
     if subtotal_bani < zone.minimum_basket_bani:

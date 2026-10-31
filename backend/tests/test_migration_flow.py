@@ -33,7 +33,24 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
             zone = client.get("/api/delivery-zones").json()[0]
             assert zone["name"] == "Rîșcani"
             window = client.get("/api/delivery-windows", params={"zone_id": zone["id"]}).json()[0]
-            product = next(p for p in client.get("/api/products").json() if p["product_type"] == "meal_plan")
+            assert client.get("/api/products").json() == []
+            headers = {"Authorization": "Bearer test-secret"}
+            demo_products = client.get("/api/admin/products", headers=headers).json()
+            assert len(demo_products) == 11 and all(p["demo_only"] and not p["available"] for p in demo_products)
+            response = client.post("/api/orders", json={
+                "customer_name": "Test", "phone": "+37360000000", "address": "Adresă de test",
+                "zone_id": zone["id"], "delivery_window_id": window["id"],
+                "items": [{"product_id": demo_products[0]["id"], "quantity": 1}],
+            })
+            assert response.status_code == 400
+            created = client.post("/api/admin/products", headers=headers, json={
+                "name": "Automated test product", "description": "Test only; not a commercial offer.",
+                "category": "test", "price_bani": 65_000, "storage_type": "fresh",
+                "product_type": "meal_plan", "available": True, "demo_only": False,
+            })
+            assert created.status_code == 201
+            product = client.get("/api/products").json()[0]
+            assert product["id"] == created.json()["id"]
             response = client.post("/api/orders", json={
                 "customer_name": "Test", "phone": "+37360000000", "address": "Adresă de test",
                 "zone_id": zone["id"], "delivery_window_id": window["id"],
@@ -47,6 +64,39 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
             markers = client.get("/api/admin/orders/map", headers={"Authorization": "Bearer test-secret"}).json()["markers"]
             assert [marker["id"] for marker in markers] == [order_id]
             assert markers[0]["location_verification_status"] == "unverified"
+            assert client.get("/api/admin/orders").status_code == 401
+            assert client.get(f"/api/admin/orders/{order_id}").status_code == 401
+            unbatched = client.get("/api/admin/orders", params={"unbatched": True}, headers=headers).json()
+            assert [order["id"] for order in unbatched] == [order_id]
+            detail = client.get(f"/api/admin/orders/{order_id}", headers=headers).json()
+            assert detail["address"] == "Adresă de test" and detail["phone"] == "+37360000000"
+            assert detail["items"][0]["unit_price_bani"] == 65_000
+            batch = client.post("/api/admin/batches", headers=headers, json={
+                "zone_id": zone["id"], "delivery_window_id": window["id"], "order_ids": [order_id],
+            })
+            assert batch.status_code == 201
+            batch_id = batch.json()["id"]
+            assert batch.json()["order_ids"] == [order_id] and batch.json()["storage_type"] == "fresh"
+            assert client.get("/api/admin/orders", params={"unbatched": True}, headers=headers).json() == []
+            assert client.get(f"/api/admin/orders/{order_id}", headers=headers).json()["delivery_batch_id"] == batch_id
+            path = f"/api/admin/batches/{batch_id}"
+            assert client.get(f"{path}/financial-summary").status_code == 401
+            incomplete = client.get(f"{path}/financial-summary", headers=headers).json()
+            assert not incomplete["estimate_complete"] and incomplete["contribution_before_overhead_bani"] is None
+            assert client.patch(f"/api/admin/products/{product['id']}", headers=headers,
+                                json={"production_cost_bani": 30_000}).status_code == 200
+            assert client.patch(f"{path}/costs", headers=headers, json={"estimate_kind": "demo",
+                                "estimated_transport_bani": 5_000,
+                                "estimated_packaging_per_order_bani": 5_000}).status_code == 200
+            summary = client.get(f"{path}/financial-summary", headers=headers).json()
+            assert summary["estimate_complete"] and summary["estimate_kind"] == "demo"
+            assert summary["revenue_bani"] == 65_000 and summary["estimated_food_cost_bani"] == 30_000
+            assert summary["contribution_before_overhead_bani"] == 25_000
+            production = client.get(f"{path}/production", headers=headers).json()
+            assert production["products"][0]["product_id"] == product["id"]
+            assert production["products"][0]["quantity"] == 1
+            manifest = client.get(f"{path}/delivery-manifest", headers=headers).json()
+            assert manifest["stops"][0]["order_id"] == order_id
             with Session(engine) as db:
                 assert db.get(Order, order_id) is not None
                 assert db.scalars(select(OrderItem).where(OrderItem.order_id == order_id)).one().unit_price_bani == product["price_bani"]
