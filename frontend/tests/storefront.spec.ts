@@ -51,10 +51,14 @@ type State = {
   windows: object[];
   postStatus: number;
   posts: number;
+  failProducts?: boolean;
+  failPost?: boolean;
 };
 async function mockPublic(page: Page, state: State) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/products" && state.failProducts)
+      return route.abort("failed");
     if (url.pathname === "/api/products")
       return route.fulfill({ json: state.products });
     if (url.pathname === "/api/delivery-zones")
@@ -63,6 +67,7 @@ async function mockPublic(page: Page, state: State) {
       return route.fulfill({ json: state.windows });
     if (url.pathname === "/api/orders" && route.request().method() === "POST") {
       state.posts++;
+      if (state.failPost) return route.abort("failed");
       return route.fulfill({
         status: state.postStatus,
         json:
@@ -129,6 +134,193 @@ test("category filter, quantities and mixed storage are reflected in the cart", 
     page.getByRole("link", { name: "Coș: 2 produse" }),
   ).toBeVisible();
 });
+
+test("changed delivery fee refreshes the estimate and requires another submission", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await checkout(page);
+  data.zones = [{ ...zone, delivery_fee_bani: 3500 }];
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.getByRole("alert")).toContainText("Condițiile de livrare s-au schimbat");
+  await expect(page.locator(".checkout-summary")).toContainText("35,00 MDL");
+  await expect(page.locator(".checkout-summary")).toContainText("685,00 MDL");
+  expect(data.posts).toBe(0);
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.locator(".receipt")).toBeVisible();
+  expect(data.posts).toBe(1);
+});
+
+test("changed minimum updates the summary and blocks an insufficient basket", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await checkout(page);
+  data.zones = [{ ...zone, minimum_basket_bani: 80000 }];
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.getByRole("alert")).toContainText("Condițiile de livrare s-au schimbat");
+  await expect(page.locator(".checkout-summary")).toContainText("800,00 MDL");
+  await expect(page.getByRole("button", { name: "Trimite cererea" })).toBeDisabled();
+  expect(data.posts).toBe(0);
+});
+
+test("simultaneous product and delivery changes are both disclosed", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await checkout(page);
+  data.products = [{ ...product, price_bani: 70000 }, frozen];
+  data.zones = [{ ...zone, delivery_fee_bani: 3500 }];
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.getByRole("alert")).toContainText("Prețul");
+  await expect(page.getByRole("alert")).toContainText("Condițiile de livrare s-au schimbat");
+  await expect(page.locator(".checkout-summary")).toContainText("735,00 MDL");
+  expect(data.posts).toBe(0);
+});
+
+test("a storage change that makes the cart incompatible blocks checkout", async ({ page }) => {
+  const data = state();
+  const second = { ...product, id: 3, name: "Al doilea produs" };
+  data.products = [product, second];
+  await mockPublic(page, data);
+  await page.goto("/catalog");
+  await page.getByRole("button", { name: "Adaugă Plan test în coș" }).click();
+  await page.getByRole("button", { name: "Adaugă Al doilea produs în coș" }).click();
+  await page.getByRole("link", { name: /Coș:/ }).click();
+  await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
+  await page.getByLabel("Nume și prenume").fill("Client Test");
+  await page.getByLabel("Telefon").fill("+37360000000");
+  await page.getByLabel("Adresa de livrare").fill("Adresă fictivă");
+  await page.getByLabel("Zona de livrare").selectOption("1");
+  await expect(page.getByLabel("Interval de livrare").locator("option")).toHaveCount(2);
+  await page.getByLabel("Interval de livrare").selectOption("1");
+  data.products = [product, { ...second, storage_type: "frozen" }];
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.getByRole("alert")).toContainText("condițiile de păstrare");
+  await expect(page.getByText("Produsele trebuie să aibă același tip de păstrare validat.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Trimite cererea" })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "Coș: 2 produse" })).toBeVisible();
+  expect(data.posts).toBe(0);
+});
+
+for (const scenario of ["storage", "inactive-zone", "expired-window", "inactive-window", "full-window", "network"] as const) {
+  test(`checkout preserves the cart for ${scenario}`, async ({ page }) => {
+    const data = state();
+    await mockPublic(page, data);
+    await checkout(page);
+    if (scenario === "storage") data.products = [{ ...product, storage_type: "frozen" }, frozen];
+    if (scenario === "inactive-zone") data.zones = [{ ...zone, active: false }];
+    if (scenario === "expired-window") data.windows = [{ ...windowData, ordering_cutoff: "2000-01-01T00:00:00Z" }];
+    if (scenario === "inactive-window") data.windows = [{ ...windowData, active: false }];
+    if (scenario === "full-window") data.windows = [{ ...windowData, capacity: 1, reserved_orders: 1 }];
+    if (scenario === "network") data.failProducts = true;
+    await page.getByRole("button", { name: "Trimite cererea" }).click();
+    await expect(page.getByRole("alert")).toBeVisible();
+    expect(data.posts).toBe(0);
+    await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toBeVisible();
+    if (scenario === "storage") {
+      await page.getByRole("link", { name: /Coș:/ }).click();
+      await expect(page.getByText("Congelat", { exact: false })).toBeVisible();
+    }
+  });
+}
+
+for (const status of [400, 409, 422, 0]) {
+  test(`order failure ${status || "network"} retains the cart`, async ({ page }) => {
+    const data = state();
+    data.postStatus = status;
+    data.failPost = status === 0;
+    await mockPublic(page, data);
+    await checkout(page);
+    await page.getByRole("button", { name: "Trimite cererea" }).click();
+    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toBeVisible();
+    expect(data.posts).toBe(1);
+  });
+}
+
+test("reloading a changed cart alerts without silently replacing its price", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await checkout(page);
+  data.products = [{ ...product, price_bani: 70000 }, frozen];
+  await page.goto("/cos");
+  await page.reload();
+  await expect(page.getByRole("alert")).toContainText("Plan test");
+  await expect(page.locator(".cart-summary")).toContainText("650,00 MDL");
+  await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
+  await page.getByLabel("Nume și prenume").fill("Client Test");
+  await page.getByLabel("Telefon").fill("+37360000000");
+  await page.getByLabel("Adresa de livrare").fill("Adresă fictivă");
+  await page.getByLabel("Zona de livrare").selectOption("1");
+  await expect(page.getByLabel("Interval de livrare").locator("option")).toHaveCount(2);
+  await page.getByLabel("Interval de livrare").selectOption("1");
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.getByRole("alert")).toContainText("Prețul");
+  await expect(page.locator(".checkout-summary")).toContainText("700,00 MDL");
+  expect(data.posts).toBe(0);
+});
+
+test("a changed cart price can be reviewed before meeting the minimum", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await page.goto("/catalog");
+  await page.getByRole("button", { name: "Adaugă Plan test în coș" }).click();
+  data.products = [{ ...product, price_bani: 75000 }, frozen];
+  data.zones = [{ ...zone, minimum_basket_bani: 70000 }];
+  await page.goto("/cos");
+  await expect(page.getByRole("alert")).toContainText("Plan test");
+  await page.getByRole("button", { name: "Actualizează produsele disponibile" }).click();
+  await expect(page.locator(".cart-summary")).toContainText("750,00 MDL");
+  await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
+  await page.getByLabel("Zona de livrare").selectOption("1");
+  await expect(page.getByLabel("Interval de livrare").locator("option")).toHaveCount(2);
+  await page.getByLabel("Interval de livrare").selectOption("1");
+  await expect(page.getByRole("button", { name: "Trimite cererea" })).toBeEnabled();
+  expect(data.posts).toBe(0);
+});
+
+test("live and demo carts stay isolated across mode changes and refresh", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await page.goto("/catalog");
+  await page.getByLabel("Cantitate pentru Plan test").fill("2");
+  await page.getByRole("button", { name: "Adaugă Plan test în coș" }).click();
+  await page.getByRole("button", { name: "Încearcă demo" }).click();
+  await expect(page.getByRole("link", { name: "Coș: 0 produse" })).toBeVisible();
+  await page.getByRole("button", { name: "Adaugă Plan de mese pentru 3 zile în coș" }).click();
+  await page.reload();
+  await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toBeVisible();
+  await page.getByRole("button", { name: "Ieși din demo" }).click();
+  await page.getByRole("link", { name: "Coș: 2 produse" }).click();
+  await expect(page.getByText("Plan test", { exact: true })).toBeVisible();
+  expect(data.posts).toBe(0);
+});
+
+test("customer direct routes, reload and browser history work", async ({ page }) => {
+  await mockPublic(page, state());
+  for (const path of ["/", "/catalog", "/planuri", "/cos", "/checkout"]) {
+    await page.goto(path);
+    await expect(page.locator("main")).toBeVisible();
+    await page.reload();
+    await expect(page.locator("main")).toBeVisible();
+  }
+  await page.goto("/catalog");
+  await page.getByRole("link", { name: /Coș:/ }).click();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/catalog$/);
+  await page.goForward();
+  await expect(page).toHaveURL(/\/cos$/);
+});
+
+for (const viewport of [{ name: "mobile", width: 390, height: 844 }, { name: "desktop", width: 1440, height: 900 }]) {
+  test(`customer checkout controls fit and work on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await mockPublic(page, state());
+    await checkout(page);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.getByRole("button", { name: "Trimite cererea" }).click();
+    await expect(page.locator(".receipt")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+}
 
 test("demo mode and simulated confirmation survive refresh without posting", async ({
   page,
@@ -202,4 +394,8 @@ test("failed order preserves cart; successful receipt survives refresh", async (
   await expect(page.locator(".receipt")).toContainText("#42");
   await page.reload();
   await expect(page.locator(".receipt")).toContainText("#42");
+  const stored = await page.evaluate(() => JSON.stringify({ ...sessionStorage, ...localStorage }));
+  expect(stored).not.toContain("Client Test");
+  expect(stored).not.toContain("+37360000000");
+  expect(stored).not.toContain("Adresă fictivă");
 });

@@ -1,5 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/products", route => route.fulfill({ json: [] }));
+});
+
 const order = {
   id: 5,
   customer_name: "Client Test",
@@ -222,3 +226,91 @@ test("incomplete financial estimate exposes known and missing costs", async ({
   ).toBeVisible();
   await expect(page.getByText("Cost produse: Indisponibil")).toBeVisible();
 });
+
+test("location validation and failed saves preserve manual review", async ({ page }) => {
+  let saved = false;
+  let calls = 0;
+  let verified = false;
+  await page.route("**/api/admin/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/location")) {
+      calls++;
+      if (calls === 1) return route.fulfill({ status: 400, json: { detail: "Save failed" } });
+      const payload = route.request().postDataJSON();
+      if (payload.location_verification_status === "verified") verified = true;
+      else {
+        expect(payload).not.toHaveProperty("location_verification_status");
+        saved = true;
+      }
+      return route.fulfill({ json: { ...unlocated, latitude: 47.02, longitude: 28.83, location_verification_status: verified ? "verified" : "unverified" } });
+    }
+    if (path.endsWith("/orders/map")) return route.fulfill({ json: saved ? { markers: [{ ...unlocated, latitude: 47.02, longitude: 28.83, location_verification_status: verified ? "verified" : "unverified" }], unlocated: [] } : { markers: [], unlocated: [unlocated] } });
+    if (path.endsWith("/orders/5")) return route.fulfill({ json: { ...order, phone: "+37360000000", address: "Adresă fictivă", latitude: null, longitude: null, location_verification_status: "unlocated", location_review_note: null, delivery_instructions: null, items: [] } });
+    return route.fulfill({ json: [] });
+  });
+  await page.goto("/admin/map");
+  await login(page);
+  await page.getByRole("button", { name: "Comanda #5" }).click();
+  await page.getByLabel("Latitudine").fill("91");
+  await page.getByLabel("Longitudine").fill("28.83");
+  await page.getByRole("button", { name: "Salvează coordonatele" }).click();
+  expect(calls).toBe(0);
+  await page.getByLabel("Latitudine").fill("47.02");
+  await page.getByRole("button", { name: "Salvează coordonatele" }).click();
+  await expect(page.getByRole("alert")).toContainText("Save failed");
+  await expect(page.getByRole("button", { name: "Marchează verificat manual" })).toBeDisabled();
+  await page.getByRole("button", { name: "Salvează coordonatele" }).click();
+  await expect(page.getByText("unverified", { exact: false })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fără coordonate (0)" })).toBeVisible();
+  expect(verified).toBe(false);
+  await page.getByRole("button", { name: "Marchează verificat manual" }).click();
+  await expect.poll(() => verified).toBe(true);
+});
+
+test("overview labels its page and separates simulated orders", async ({ page }) => {
+  await page.route("**/api/admin/**", route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/orders") && url.searchParams.get("limit") === "25") {
+      const demo = url.searchParams.get("is_demo") === "true";
+      const offset = Number(url.searchParams.get("offset"));
+      const count = demo ? 1 : offset === 0 ? 25 : 1;
+      return route.fulfill({ json: Array.from({ length: count }, (_, i) => ({ ...order, id: offset + i + 1, is_demo: demo })) });
+    }
+    return route.fulfill({ json: [] });
+  });
+  await page.goto("/admin");
+  await login(page);
+  await expect(page.getByText("Valorile acoperă doar pagina afișată, nu toate comenzile.")).toBeVisible();
+  await expect(page.getByText("Valoare solicitată pe pagină")).toBeVisible();
+  await expect(page.getByText("Comenzi pe pagină").locator(".." )).toContainText("25");
+  await page.getByRole("button", { name: "Înainte" }).click();
+  await expect(page.getByText("Comenzi pe pagină").locator(".." )).toContainText("1");
+  await page.getByLabel("Tip date").selectOption("true");
+  await expect(page.getByText("Date afișate").locator(".." )).toContainText("Simulate");
+  await expect(page.getByText("De la 1", { exact: true })).toBeVisible();
+});
+
+for (const viewport of [{ name: "mobile", width: 390, height: 844 }, { name: "desktop", width: 1440, height: 900 }]) {
+  test(`admin direct routes and controls work on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.route("**/api/admin/**", route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/orders/map")) return route.fulfill({ json: { markers: [], unlocated: [] } });
+      return route.fulfill({ json: [] });
+    });
+    for (const path of ["/admin", "/admin/orders", "/admin/batches", "/admin/map"]) {
+      await page.goto(path);
+      await login(page);
+      await expect(page.locator(".admin-main")).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.reload();
+      await expect(page.getByLabel("Token de acces")).toBeVisible();
+    }
+    await login(page);
+    await page.getByRole("button", { name: "Comenzi", exact: true }).click();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/admin\/map$/);
+    await page.goForward();
+    await expect(page).toHaveURL(/\/admin\/orders$/);
+  });
+}

@@ -108,14 +108,6 @@ export default function App() {
       .then((data) => {
         if (active) {
           setProducts(data);
-          setCarts((current) => {
-            const updated = current.live.map((item) => {
-              const fresh = data.find((p) => p.id === item.product.id);
-              return fresh ? { ...item, product: fresh } : item;
-            });
-            sessionStorage.setItem("credem-cart-live", JSON.stringify(updated));
-            return { ...current, live: updated };
-          });
         }
       })
       .catch((e) => {
@@ -164,11 +156,33 @@ export default function App() {
         )
         .filter((i) => i.quantity > 0),
     );
+  const updateProducts = (fresh: Product[]) => {
+    setProducts(fresh);
+    setCart((items) =>
+      items.map((item) => ({
+        ...item,
+        product: fresh.find((p) => p.id === item.product.id) || item.product,
+      })),
+    );
+  };
   const subtotal = cart.reduce(
     (sum, i) => sum + i.product.price_bani * i.quantity,
     0,
   );
   const count = cart.reduce((sum, i) => sum + i.quantity, 0);
+  const cartChanges =
+    mode === "live" && !loading && !error
+      ? cart.filter(({ product }) => {
+          const current = products.find(
+            (item) => item.id === product.id && item.available && !item.demo_only,
+          );
+          return (
+            !current ||
+            current.price_bani !== product.price_bani ||
+            current.storage_type !== product.storage_type
+          );
+        })
+      : [];
   if (path === "/admin" || path.startsWith("/admin/"))
     return <Admin path={path} navigate={navigate} />;
   const link = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
@@ -379,6 +393,18 @@ export default function App() {
                 <p>Revizuiește produsele înainte de a trimite cererea.</p>
               </div>
             </div>
+            {cartChanges.length > 0 && (
+              <div className="error" role="alert">
+                <p>
+                  Disponibilitatea, prețul sau condițiile de păstrare s-au
+                  schimbat pentru: {cartChanges.map(({ product }) => product.name).join(", ")}.
+                  Actualizează produsele disponibile și elimină-le pe cele indisponibile.
+                </p>
+                <button type="button" onClick={() => updateProducts(products)}>
+                  Actualizează produsele disponibile
+                </button>
+              </div>
+            )}
             <Cart
               cart={cart}
               change={change}
@@ -394,16 +420,7 @@ export default function App() {
             cart={cart}
             subtotal={subtotal}
             navigate={navigate}
-            updateProducts={(fresh) => {
-              setProducts(fresh);
-              setCart((items) =>
-                items.map((item) => ({
-                  ...item,
-                  product:
-                    fresh.find((p) => p.id === item.product.id) || item.product,
-                })),
-              );
-            }}
+            updateProducts={updateProducts}
             onSuccess={(order) => {
               const confirmation = { order, demo: mode === "demo" };
               sessionStorage.setItem(
@@ -613,7 +630,7 @@ function CatalogCard({
               value={quantity}
               onChange={(e) =>
                 setQuantity(
-                  Math.max(1, Math.min(1000, Number(e.target.value) || 1)),
+                  Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value)) || 1)),
                 )
               }
             />
@@ -732,7 +749,7 @@ function ProductDetail({
                 value={quantity}
                 onChange={(e) =>
                   setQuantity(
-                    Math.max(1, Math.min(1000, Number(e.target.value) || 1)),
+                    Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value)) || 1)),
                   )
                 }
               />
@@ -945,9 +962,14 @@ function Checkout({
         const currentWindow = freshWindows.find(
           (item) => item.id === Number(windowId),
         );
+        const zoneChanged = currentZone && (
+          currentZone.minimum_basket_bani !== zone.minimum_basket_bani ||
+          currentZone.delivery_fee_bani !== zone.delivery_fee_bani
+        );
+        // Update the displayed estimate before asking for another submission.
         setZones(freshZones);
         setWindows(freshWindows);
-        if (!currentZone) {
+        if (!currentZone || !currentZone.active) {
           setZoneId("");
           setError(
             "Zona selectată nu mai este disponibilă. Alege o altă zonă.",
@@ -956,6 +978,13 @@ function Checkout({
         }
         if (
           !currentWindow ||
+          currentWindow.zone_id !== zone.id ||
+          currentWindow.active === false ||
+          (currentWindow.capacity != null &&
+            currentWindow.reserved_orders != null &&
+            currentWindow.reserved_orders >= currentWindow.capacity) ||
+          !Number.isFinite(Date.parse(currentWindow.ordering_cutoff)) ||
+          !Number.isFinite(Date.parse(currentWindow.delivery_at)) ||
           Date.parse(currentWindow.ordering_cutoff) <= Date.now() ||
           Date.parse(currentWindow.delivery_at) <= Date.now()
         ) {
@@ -987,14 +1016,12 @@ function Checkout({
         if (changed) {
           updateProducts(freshProducts);
           setError(
-            "Prețul sau condițiile de păstrare s-au schimbat. Verifică din nou coșul înainte de a trimite cererea.",
+            "Prețul sau condițiile de păstrare s-au schimbat. Verifică din nou coșul înainte de a trimite cererea." +
+              (zoneChanged ? " Condițiile de livrare s-au schimbat. Verifică noul minim și taxa." : ""),
           );
           return;
         }
-        if (
-          currentZone.minimum_basket_bani !== zone.minimum_basket_bani ||
-          currentZone.delivery_fee_bani !== zone.delivery_fee_bani
-        ) {
+        if (zoneChanged) {
           setError(
             "Condițiile de livrare s-au schimbat. Verifică noul minim și taxa înainte de a continua.",
           );
