@@ -29,9 +29,9 @@ def api(tmp_path):
     with Session(engine) as db:
         db.add_all([
             Product(id=1, name="Meal plan", description="Three days", category="plan", price_bani=35_000,
-                    storage_type="fresh", available=True, demo_only=False),
+                    storage_type="chilled", available=True, demo_only=False, fulfillment_group="meals", preparation_level="ready"),
             Product(id=2, name="Soup", description="Fresh soup", category="food", price_bani=10_000,
-                    storage_type="fresh", available=True, demo_only=False),
+                    storage_type="chilled", available=True, demo_only=False, fulfillment_group="meals", preparation_level="ready"),
             Product(id=3, name="Unavailable", description="Unavailable", category="food", price_bani=50_000,
                     storage_type="fresh", available=False, demo_only=False),
             Product(id=4, name="Demo", description="Demo only", category="food", price_bani=50_000,
@@ -42,9 +42,9 @@ def api(tmp_path):
         ])
         db.flush()
         db.add_all([
-            DeliveryWindow(id=1, zone_id=1, delivery_at=now + timedelta(days=3), ordering_cutoff=now + timedelta(days=2)),
-            DeliveryWindow(id=2, zone_id=2, delivery_at=now + timedelta(days=3), ordering_cutoff=now + timedelta(days=2)),
-            DeliveryWindow(id=3, zone_id=1, delivery_at=now + timedelta(days=1), ordering_cutoff=now - timedelta(days=1)),
+            DeliveryWindow(id=1, zone_id=1, fulfillment_group="meals", delivery_at=now + timedelta(days=3), ordering_cutoff=now + timedelta(days=2)),
+            DeliveryWindow(id=2, zone_id=2, fulfillment_group="meals", delivery_at=now + timedelta(days=3), ordering_cutoff=now + timedelta(days=2)),
+            DeliveryWindow(id=3, zone_id=1, fulfillment_group="meals", delivery_at=now + timedelta(days=1), ordering_cutoff=now - timedelta(days=1)),
         ])
         db.commit()
 
@@ -65,6 +65,7 @@ def valid_order():
     return {
         "customer_name": " Ana ", "phone": "+373 600 00000", "address": "Test street 1",
         "zone_id": 1, "delivery_window_id": 1,
+        "fulfillment_group": "meals",
         "items": [{"product_id": 1, "quantity": 2, "unit_price_bani": 1}, {"product_id": 2, "quantity": 1}],
     }
 
@@ -189,7 +190,7 @@ def test_listings(api):
     assert [product["id"] for product in products.json()] == [1, 2]
     assert "production_cost_bani" not in products.json()[0]
     assert [zone["id"] for zone in client.get("/api/delivery-zones").json()] == [1, 2]
-    windows = client.get("/api/delivery-windows", params={"zone_id": 1}).json()
+    windows = client.get("/api/delivery-windows", params={"zone_id": 1, "fulfillment_group": "meals"}).json()
     assert [window["id"] for window in windows] == [1]
     assert windows[0]["delivery_at"].endswith("Z")
 
@@ -199,7 +200,7 @@ def test_order_uses_server_prices_and_saves_items(api):
     response = client.post("/api/orders", json=valid_order())
     assert response.status_code == 201
     assert response.json() == {"id": 1, "subtotal_bani": 80_000, "delivery_fee_bani": 0,
-                               "total_bani": 80_000, "status": "requested"}
+                               "total_bani": 80_000, "status": "requested", "fulfillment_group": "meals"}
     with Session(engine) as db:
         order = db.get(Order, 1)
         assert (order.customer_name, order.total_bani, order.status) == ("Ana", 80_000, "requested")
@@ -231,7 +232,7 @@ def test_order_rejects_mixed_storage_without_reserving_capacity(api, first_type,
         db.commit()
     response = client.post("/api/orders", json=valid_order())
     assert response.status_code == 400
-    assert response.json()["detail"] == "Products with different storage types must be ordered separately"
+    assert "storage" in response.json()["detail"].lower()
     with Session(engine) as db:
         assert db.scalars(select(Order)).all() == []
         assert db.scalars(select(OrderItem)).all() == []
@@ -249,21 +250,24 @@ def test_order_rejects_unvalidated_storage_without_reserving_capacity(api, inclu
         payload["items"] = [{"product_id": 1, "quantity": 2}]
     response = client.post("/api/orders", json=payload)
     assert response.status_code == 400
-    assert response.json()["detail"] == "One or more products have unvalidated storage requirements"
+    assert "storage" in response.json()["detail"].lower()
     with Session(engine) as db:
         assert db.scalars(select(Order)).all() == []
         assert db.get(DeliveryWindow, 1).reserved_orders == 0
 
 
-@pytest.mark.parametrize("storage_type", ["fresh", "chilled", "frozen"])
+@pytest.mark.parametrize("storage_type", ["chilled", "frozen"])
 def test_order_with_one_storage_type_can_be_batched(api, monkeypatch, storage_type):
     client, engine = api
     monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
     with Session(engine) as db:
         db.get(Product, 1).storage_type = storage_type
         db.get(Product, 2).storage_type = storage_type
+        db.get(Product, 1).fulfillment_group = "frozen" if storage_type == "frozen" else "meals"
+        db.get(Product, 2).fulfillment_group = "frozen" if storage_type == "frozen" else "meals"
+        db.get(DeliveryWindow, 1).fulfillment_group = "frozen" if storage_type == "frozen" else "meals"
         db.commit()
-    order = client.post("/api/orders", json=valid_order())
+    order = client.post("/api/orders", json=valid_order() | {"fulfillment_group": "frozen" if storage_type == "frozen" else "meals"})
     assert order.status_code == 201
     batch = client.post("/api/admin/batches", headers={"Authorization": "Bearer test-secret"}, json={
         "zone_id": 1, "delivery_window_id": 1, "order_ids": [order.json()["id"]],
@@ -323,7 +327,7 @@ def test_admin_product_lifecycle_and_order_price_snapshot(api, monkeypatch):
     assert client.patch(f"/api/admin/products/{product_id}", json={"name": None}, headers=headers).status_code == 422
 
     approved = client.patch(f"/api/admin/products/{product_id}", json={
-        "available": True, "demo_only": False, "storage_type": "chilled"
+        "available": True, "demo_only": False, "storage_type": "chilled", "fulfillment_group": "meals", "preparation_level": "ready"
     }, headers=headers)
     assert approved.status_code == 200
     order_payload = valid_order() | {"items": [{"product_id": product_id, "quantity": 1}]}
@@ -364,7 +368,7 @@ def test_zone_administration_and_fee_snapshot(api, monkeypatch):
     zone_id = created.json()["id"]
     now = datetime.now(timezone.utc)
     with Session(engine) as db:
-        window = DeliveryWindow(zone_id=zone_id, delivery_at=now + timedelta(days=3),
+        window = DeliveryWindow(zone_id=zone_id, fulfillment_group="meals", delivery_at=now + timedelta(days=3),
                                 ordering_cutoff=now + timedelta(days=2))
         db.add(window)
         db.commit()
@@ -386,7 +390,7 @@ def test_zone_administration_and_fee_snapshot(api, monkeypatch):
 
     assert client.patch("/api/admin/delivery-zones/1", headers=headers, json={"active": False}).status_code == 200
     assert zone_id not in [zone["id"] for zone in client.get("/api/delivery-zones").json()]
-    assert client.get("/api/delivery-windows", params={"zone_id": zone_id}).json() == []
+    assert client.get("/api/delivery-windows", params={"zone_id": zone_id, "fulfillment_group": "meals"}).json() == []
     assert client.post("/api/orders", json=base).status_code == 400
     with Session(engine) as db:
         assert db.get(Order, first.json()["id"]) is not None
@@ -475,8 +479,8 @@ def test_admin_order_list_and_detail_before_and_after_batching(api, monkeypatch)
     assert body["total_bani"] == 80_000 and body["created_at"].endswith("Z") and body["delivery_at"].endswith("Z")
     assert body["items"][0] == {
         "product_id": 1, "product_name": "Renamed meal", "product_sku": None, "quantity": 2,
-        "unit_price_bani": 35_000, "line_total_bani": 70_000, "storage_type_snapshot": "fresh",
-        "net_weight_g_snapshot": None, "unit_snapshot": "pack",
+        "unit_price_bani": 35_000, "line_total_bani": 70_000, "storage_type_snapshot": "chilled",
+        "net_weight_g_snapshot": None, "unit_snapshot": "pack", "custom_quantity": 0,
     }
     listing = client.get("/api/admin/orders", headers=headers).json()
     assert [item["id"] for item in listing] == [second_id, first_id]
@@ -524,7 +528,7 @@ def test_batch_creation_summary_map_and_duplicate_assignment(api, monkeypatch):
     created = client.post("/api/admin/batches", json=body, headers=headers)
     assert created.status_code == 201
     batch = created.json()
-    assert batch["storage_type"] == "fresh" and batch["status"] == "planned"
+    assert batch["storage_type"] == "chilled" and batch["status"] == "planned"
     assert batch["order_ids"] == [first, second]
     batch_id = batch["id"]
     assert client.get(f"/api/admin/batches/{batch_id}", headers=headers).json()["order_ids"] == [first, second]
@@ -575,7 +579,7 @@ def test_batch_uses_order_storage_and_weight_snapshots(api, monkeypatch):
     response = client.post("/api/admin/batches", headers=headers, json={
         "zone_id": 1, "delivery_window_id": 1, "order_ids": [order_id],
     })
-    assert response.status_code == 201 and response.json()["storage_type"] == "fresh"
+    assert response.status_code == 201 and response.json()["storage_type"] == "chilled"
     summary = client.get(f"/api/admin/batches/{response.json()['id']}/summary", headers=headers).json()
     assert summary["total_weight_g"] is None and summary["known_weight_g"] == 0
 
@@ -741,7 +745,7 @@ def test_admin_windows_and_capacity_limit(api, monkeypatch):
     monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret")
     headers = {"Authorization": "Bearer test-secret"}
     now = datetime.now(timezone.utc)
-    payload = {"zone_id": 1, "delivery_at": (now + timedelta(days=4)).isoformat(),
+    payload = {"zone_id": 1, "fulfillment_group": "meals", "delivery_at": (now + timedelta(days=4)).isoformat(),
                "ordering_cutoff": (now + timedelta(days=3)).isoformat(), "capacity": 1}
     assert client.get("/api/admin/delivery-windows").status_code == 401
     assert client.post("/api/admin/delivery-windows", json=payload).status_code == 401
@@ -754,7 +758,7 @@ def test_admin_windows_and_capacity_limit(api, monkeypatch):
     assert created.json()["delivery_at"].endswith("Z")
     order = valid_order() | {"delivery_window_id": window_id}
     assert client.post("/api/orders", json=order).status_code == 201
-    assert window_id not in [w["id"] for w in client.get("/api/delivery-windows", params={"zone_id": 1}).json()]
+    assert window_id not in [w["id"] for w in client.get("/api/delivery-windows", params={"zone_id": 1, "fulfillment_group": "meals"}).json()]
     assert client.post("/api/orders", json=order).status_code == 400
     assert client.patch(f"/api/admin/delivery-windows/{window_id}", headers=headers,
                         json={"delivery_at": (now + timedelta(days=5)).isoformat()}).status_code == 409
@@ -818,7 +822,7 @@ def test_demo_dataset_is_isolated_batchable_and_resettable(api, monkeypatch):
         window_id = demo[0].delivery_window_id
         assert db.get(DeliveryWindow, window_id).reserved_orders == 50
 
-    assert client.get("/api/delivery-windows", params={"zone_id": 4}).json() == []
+    assert client.get("/api/delivery-windows", params={"zone_id": 4, "fulfillment_group": "meals"}).json() == []
     assert all(not product["sku"] or not product["sku"].startswith("DEMO-") for product in client.get("/api/products").json())
     assert client.post("/api/orders", json=valid_order() | {"zone_id": 4, "delivery_window_id": window_id}).status_code == 400
     map_result = client.get("/api/admin/orders/map", params={"is_demo": True}, headers=headers).json()

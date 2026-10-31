@@ -13,6 +13,23 @@ from app.security import require_admin
 router = APIRouter(prefix="/api/admin/products", tags=["admin products"], dependencies=[Depends(require_admin)])
 
 
+def validate_offer(product: Product) -> None:
+    if product.available and not product.demo_only:
+        if product.fulfillment_group not in ("meals", "frozen") or not product.preparation_level:
+            raise HTTPException(status_code=400, detail="Approved products require fulfillment and preparation classifications")
+        if product.storage_type != ("chilled" if product.fulfillment_group == "meals" else "frozen"):
+            raise HTTPException(status_code=400, detail="Storage type must match the approved fulfillment group")
+        if product.fulfillment_group == "meals" and product.preparation_level != "ready":
+            raise HTTPException(status_code=400, detail="Meals require ready-prepared products")
+        if product.product_type == "meal_plan":
+            if product.fulfillment_group != "meals" or product.plan_duration_days not in (2, 3):
+                raise HTTPException(status_code=400, detail="Meal plans require a two- or three-day duration")
+            if product.price_bani < product.plan_duration_days * 25000:
+                raise HTTPException(status_code=400, detail="Meal plan price must be at least 250 MDL per day")
+        elif product.plan_duration_days is not None:
+            raise HTTPException(status_code=400, detail="Only meal plans have a duration")
+
+
 def get_product(product_id: int, db: Session) -> Product:
     product = db.get(Product, product_id)
     if product is None:
@@ -36,6 +53,7 @@ def list_products(db: Annotated[Session, Depends(get_db)]) -> list[Product]:
 @router.post("", response_model=AdminProductRead, status_code=status.HTTP_201_CREATED)
 def create_product(payload: ProductCreate, db: Annotated[Session, Depends(get_db)]) -> Product:
     product = Product(**payload.model_dump())
+    validate_offer(product)
     db.add(product)
     save_product(db)
     db.refresh(product)
@@ -47,6 +65,7 @@ def update_product(product_id: int, payload: ProductUpdate, db: Annotated[Sessio
     product = get_product(product_id, db)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(product, field, value)
+    validate_offer(product)
     save_product(db)
     db.refresh(product)
     return product

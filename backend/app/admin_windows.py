@@ -45,6 +45,9 @@ def update_window(window_id: int, payload: DeliveryWindowUpdate, db: Annotated[S
         raise HTTPException(status_code=404, detail="Delivery window not found")
     values = payload.model_dump(exclude_unset=True)
     changing_times = "delivery_at" in values or "ordering_cutoff" in values
+    changing_group = "fulfillment_group" in values and values["fulfillment_group"] != window.fulfillment_group
+    if changing_group and window.reserved_orders:
+        raise HTTPException(status_code=409, detail="Cannot change group after orders have been placed")
     delivery_at = utc_datetime(values.get("delivery_at", window.delivery_at))
     cutoff = utc_datetime(values.get("ordering_cutoff", window.ordering_cutoff))
     if cutoff >= delivery_at:
@@ -59,7 +62,7 @@ def update_window(window_id: int, payload: DeliveryWindowUpdate, db: Annotated[S
         return window
 
     query = update(DeliveryWindow).where(DeliveryWindow.id == window_id)
-    if changing_times:
+    if changing_times or changing_group:
         query = query.where(DeliveryWindow.reserved_orders == 0)
     if values.get("capacity") is not None:
         query = query.where(DeliveryWindow.reserved_orders <= values["capacity"])

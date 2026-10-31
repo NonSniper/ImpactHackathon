@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, status
@@ -16,7 +16,7 @@ from app.admin_reports import router as admin_reports_router
 from app.admin_windows import router as admin_windows_router
 from app.admin_zones import is_zone_active, router as admin_zones_router
 from app.database import get_db
-from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product
+from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product, MenuAllocation
 from app.schemas import DeliveryWindowRead, DeliveryZoneRead, OrderCreate, OrderCreated, ProductRead, ProductDetailRead
 from app.storage_rules import DELIVERABLE_STORAGE_TYPES, compatible_storage_type
 
@@ -52,14 +52,15 @@ def health() -> dict[str, str]:
 @app.get("/api/products", response_model=list[ProductRead])
 def list_products(db: Annotated[Session, Depends(get_db)]) -> list[Product]:
     return list(db.scalars(select(Product).where(
-        Product.available.is_(True), Product.demo_only.is_(False)
+        Product.available.is_(True), Product.demo_only.is_(False),
+        Product.fulfillment_group.is_not(None), Product.preparation_level.is_not(None)
     ).order_by(Product.id)))
 
 
 @app.get("/api/products/{product_id}", response_model=ProductDetailRead)
 def product_detail(product_id: int, db: Annotated[Session, Depends(get_db)]) -> Product:
     product = db.get(Product, product_id)
-    if product is None or not product.available or product.demo_only:
+    if product is None or not product.available or product.demo_only or not product.fulfillment_group or not product.preparation_level:
         raise HTTPException(status_code=404, detail="Product not found")
     return product
 
@@ -71,7 +72,7 @@ def list_delivery_zones(db: Annotated[Session, Depends(get_db)]) -> list[Deliver
 
 
 @app.get("/api/delivery-windows", response_model=list[DeliveryWindowRead])
-def list_delivery_windows(db: Annotated[Session, Depends(get_db)], zone_id: Annotated[int, Query(gt=0)]) -> list[DeliveryWindowRead]:
+def list_delivery_windows(db: Annotated[Session, Depends(get_db)], zone_id: Annotated[int, Query(gt=0)], fulfillment_group: Literal["meals", "frozen"]) -> list[DeliveryWindowRead]:
     if not is_zone_active(db, db.get(DeliveryZone, zone_id)):
         return []
     now = datetime.now(timezone.utc)
@@ -80,6 +81,7 @@ def list_delivery_windows(db: Annotated[Session, Depends(get_db)], zone_id: Anno
         .join(DeliveryZone, DeliveryWindow.zone_id == DeliveryZone.id)
         .where(
             DeliveryWindow.zone_id == zone_id,
+            DeliveryWindow.fulfillment_group == fulfillment_group,
             DeliveryZone.active.is_(True),
             DeliveryWindow.is_demo.is_(False),
             DeliveryWindow.active.is_(True),
@@ -94,6 +96,7 @@ def list_delivery_windows(db: Annotated[Session, Depends(get_db)], zone_id: Anno
         zone_id=window.zone_id,
         delivery_at=utc_datetime(window.delivery_at),
         ordering_cutoff=utc_datetime(window.ordering_cutoff),
+        fulfillment_group=window.fulfillment_group,
     ) for window in windows]
 
 
@@ -107,15 +110,28 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
     window = db.get(DeliveryWindow, payload.delivery_window_id)
     now = datetime.now(timezone.utc)
     if (window is None or window.is_demo or not window.active or window.zone_id != zone.id
+            or window.fulfillment_group != payload.fulfillment_group
             or utc_datetime(window.ordering_cutoff) <= now
             or utc_datetime(window.delivery_at) <= now):
         raise HTTPException(status_code=400, detail="Delivery window is unavailable for this zone")
 
     product_ids = [item.product_id for item in payload.items]
-    products = {product.id: product for product in db.scalars(select(Product).where(Product.id.in_(product_ids)))}
+    products = {product.id: product for product in db.scalars(select(Product).where(Product.id.in_(product_ids)).with_for_update())}
     if any(product_id not in products or not products[product_id].available or products[product_id].demo_only
            for product_id in product_ids):
         raise HTTPException(status_code=400, detail="One or more products are unavailable for ordering")
+
+    if any(p.fulfillment_group != payload.fulfillment_group or not p.preparation_level for p in products.values()):
+        raise HTTPException(status_code=400, detail="Product fulfillment group or classification is invalid")
+    if any(p.storage_type != ("chilled" if payload.fulfillment_group == "meals" else "frozen") for p in products.values()):
+        raise HTTPException(status_code=400, detail="Product storage requirements are incompatible with fulfillment")
+    if payload.fulfillment_group == "meals" and any(p.preparation_level != "ready" for p in products.values()):
+        raise HTTPException(status_code=400, detail="Meals require ready-prepared products")
+    if any(p.product_type == "meal_plan" and (p.fulfillment_group != "meals" or p.plan_duration_days not in (2, 3)
+           or p.price_bani < p.plan_duration_days * 25000) for p in products.values()):
+        raise HTTPException(status_code=400, detail="Meal plan duration or price is invalid")
+    if any(item.custom_quantity and products[item.product_id].product_type != "individual_dish" for item in payload.items):
+        raise HTTPException(status_code=400, detail="Custom menus require individual dishes")
 
     storage_types = {products[product_id].storage_type for product_id in product_ids}
     if not storage_types.issubset(DELIVERABLE_STORAGE_TYPES):
@@ -124,8 +140,9 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
         raise HTTPException(status_code=400, detail="Products with different storage types must be ordered separately")
 
     subtotal_bani = sum(products[item.product_id].price_bani * item.quantity for item in payload.items)
-    if subtotal_bani < zone.minimum_basket_bani:
-        raise HTTPException(status_code=400, detail=f"Minimum basket value is {zone.minimum_basket_bani} bani")
+    minimum = max(60000, zone.minimum_basket_bani)
+    if subtotal_bani < minimum:
+        raise HTTPException(status_code=400, detail=f"Minimum basket value is {minimum} bani")
     total_bani = subtotal_bani + zone.delivery_fee_bani
     if total_bani > 2_147_483_647:
         raise HTTPException(status_code=400, detail="Order total is too large")
@@ -137,9 +154,12 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
                   coordinate_source=(payload.coordinate_source or "manual_map_pin") if payload.latitude is not None else None,
                   location_verification_status="unverified" if payload.latitude is not None else "unlocated",
                   delivery_instructions=payload.delivery_instructions)
+    order.fulfillment_group = payload.fulfillment_group
+    order.menu_days = payload.menu_days
     try:
         reserved = db.execute(update(DeliveryWindow).where(
             DeliveryWindow.id == window.id, DeliveryWindow.zone_id == zone.id,
+            DeliveryWindow.fulfillment_group == payload.fulfillment_group,
             DeliveryWindow.is_demo.is_(False),
             DeliveryWindow.active.is_(True), DeliveryWindow.ordering_cutoff > datetime.now(timezone.utc),
             DeliveryWindow.delivery_at > datetime.now(timezone.utc),
@@ -153,7 +173,12 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
                               unit_price_bani=products[item.product_id].price_bani,
                               storage_type_snapshot=products[item.product_id].storage_type,
                               net_weight_g_snapshot=products[item.product_id].net_weight_g,
-                              unit_snapshot=products[item.product_id].unit) for item in payload.items])
+                              unit_snapshot=products[item.product_id].unit,
+                              custom_quantity=item.custom_quantity) for item in payload.items])
+        db.flush()
+        db.add_all([MenuAllocation(order_id=order.id, product_id=a.product_id, day_index=a.day_index,
+                                   member_label=a.member_label, quantity=a.quantity, meal_period=a.meal_period,
+                                   product_name_snapshot=products[a.product_id].name) for a in payload.allocations])
         db.commit()
     except Exception:
         db.rollback()

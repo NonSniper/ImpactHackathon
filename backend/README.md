@@ -41,6 +41,18 @@ python -m pytest -q
 
 ## API contract
 
+### Fulfillment groups and family menus
+
+Products expose nullable `fulfillment_group` (`meals` or `frozen`), `preparation_level` (`ready` or `semi_prepared`), and `plan_duration_days` (2 or 3 for meal plans). Legacy unclassified products remain in admin but are not orderable. Approving a live offer requires its group and preparation level, chilled storage for meals or frozen storage for frozen items, and for meal plans a valid duration and a price of at least 25,000 bani per day.
+
+`GET /api/delivery-windows` requires `zone_id` and `fulfillment_group`; its responses contain the group. Admin window creation requires `fulfillment_group`, and unreserved legacy windows can be classified through the existing PATCH endpoint. Previously reserved windows remain historical and cannot be reclassified.
+
+`POST /api/orders` requires `fulfillment_group` and the existing contact, zone, window and item fields. Each item can include `custom_quantity` (default 0). Optional `menu_days` (1–3) and `allocations` describe a family menu: each allocation contains `product_id`, `day_index`, `member_label`, `quantity`, and an optional `meal_period` (`breakfast`, `lunch`, or `dinner`). New guided menus provide a period. Historical and older-client allocations may have a null period and remain unclassified. For each item, allocation quantities must equal its custom quantity, which may not exceed its total quantity. The order response and admin order summaries include the group; admin details additionally include `menu_days`, item custom quantities, and allocations with product-name snapshots. Historical orders return null group and empty allocations.
+
+Each order's minimum subtotal is the greater of 60,000 bani and the selected zone minimum. Meals and frozen require separate orders, windows and batches. Totals and reports use the aggregate order items, never the allocations. Geocoding is optional and does not verify a delivery zone.
+
+For the dedicated local database `sqlite:///./credem-local.sqlite3` only, `CREDEM_LOCAL_SAMPLE=1 python -m app.seed_local_family` creates fictional test-only offers and windows without altering existing data. These offers are not CREDEM-approved commercial products. Production seed protections remain unchanged.
+
 Amounts are integer **bani**: 100 bani = 1 MDL. Delivery times and ordering cutoffs are UTC and use ISO 8601; `Z` denotes UTC. The example IDs and dates below are illustrative. Obtain current IDs and future windows using the listing endpoints rather than hard-coding them.
 
 ### `GET /api/products`
