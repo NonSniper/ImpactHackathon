@@ -310,7 +310,7 @@ test("product editor sends fulfillment and plan metadata", async ({ page }) => {
   await page.getByLabel("Grup livrare").selectOption("meals");
   await page.getByLabel("Nivel preparare").selectOption("ready");
   await page.getByLabel("Durată plan").selectOption("3");
-  await page.getByRole("button", { name: "Salvează", exact: true }).click();
+  await page.getByRole("button", { name: "Salvează produsul", exact: true }).click();
   await expect.poll(() => created).toMatchObject({ fulfillment_group: "meals", preparation_level: "ready", plan_duration_days: 3, price_bani: 75000, available: false, demo_only: true });
 });
 
