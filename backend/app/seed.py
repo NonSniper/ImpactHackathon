@@ -107,6 +107,7 @@ def seed(db: Session, now: datetime | None = None) -> None:
             continue
         existing_window = db.scalar(select(DeliveryWindow).where(
             DeliveryWindow.zone_id == zone.id,
+            DeliveryWindow.is_demo.is_(False),
             DeliveryWindow.delivery_at > now,
             DeliveryWindow.ordering_cutoff > now,
         ).limit(1))

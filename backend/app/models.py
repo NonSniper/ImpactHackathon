@@ -36,6 +36,10 @@ class Product(Base):
     shelf_life_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     preparation_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     supplier: Mapped[str] = mapped_column(String(120), nullable=False, default="CREDEM", server_default=text("'CREDEM'"))
+    image_preview_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_detail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_preview_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    image_detail_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 class DeliveryZone(Base):
@@ -62,12 +66,43 @@ class DeliveryWindow(Base):
     __tablename__ = "delivery_windows"
     __table_args__ = (
         CheckConstraint("ordering_cutoff < delivery_at", name="ck_delivery_windows_cutoff_before_delivery"),
+        CheckConstraint("capacity IS NULL OR capacity > 0", name="ck_delivery_windows_capacity_positive"),
+        CheckConstraint("reserved_orders >= 0", name="ck_delivery_windows_reserved_nonnegative"),
+        CheckConstraint("capacity IS NULL OR reserved_orders <= capacity", name="ck_delivery_windows_capacity_not_exceeded"),
+        CheckConstraint("demo_dataset_key IS NULL OR is_demo = true", name="ck_delivery_windows_demo_dataset"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     zone_id: Mapped[int] = mapped_column(ForeignKey("delivery_zones.id"), nullable=False, index=True)
     delivery_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ordering_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reserved_orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    demo_dataset_key: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+
+class DeliveryBatch(Base):
+    __tablename__ = "delivery_batches"
+    __table_args__ = (
+        CheckConstraint("storage_type IN ('fresh', 'chilled', 'frozen')", name="ck_batches_storage_type"),
+        CheckConstraint("status IN ('planned')", name="ck_batches_status"),
+        CheckConstraint("estimate_kind IS NULL OR estimate_kind IN ('demo', 'operational')", name="ck_batches_estimate_kind"),
+        CheckConstraint("estimated_transport_bani IS NULL OR estimated_transport_bani >= 0", name="ck_batches_transport_nonnegative"),
+        CheckConstraint("estimated_packaging_per_order_bani IS NULL OR estimated_packaging_per_order_bani >= 0", name="ck_batches_packaging_nonnegative"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    zone_id: Mapped[int] = mapped_column(ForeignKey("delivery_zones.id"), nullable=False)
+    delivery_window_id: Mapped[int] = mapped_column(ForeignKey("delivery_windows.id"), nullable=False)
+    storage_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned", server_default=text("'planned'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    estimate_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    estimated_transport_bani: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_packaging_per_order_bani: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Order(Base):
@@ -82,7 +117,9 @@ class Order(Base):
         CheckConstraint("location_verification_status IN ('unlocated', 'unverified', 'verified', 'flagged')", name="ck_orders_location_status"),
         CheckConstraint("(latitude IS NULL AND location_verification_status = 'unlocated' AND coordinate_source IS NULL) OR "
                         "(latitude IS NOT NULL AND location_verification_status IN ('unverified', 'verified', 'flagged') "
-                        "AND coordinate_source IS NOT NULL AND coordinate_source IN ('manual_map_pin', 'admin'))", name="ck_orders_location_consistent"),
+                        "AND coordinate_source IS NOT NULL AND coordinate_source IN ('manual_map_pin', 'admin', 'simulated'))", name="ck_orders_location_consistent"),
+        CheckConstraint("coordinate_source IS NULL OR coordinate_source != 'simulated' OR is_demo = true", name="ck_orders_simulated_source"),
+        CheckConstraint("demo_dataset_key IS NULL OR is_demo = true", name="ck_orders_demo_dataset"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -91,6 +128,7 @@ class Order(Base):
     address: Mapped[str] = mapped_column(String(300), nullable=False)
     zone_id: Mapped[int] = mapped_column(ForeignKey("delivery_zones.id"), nullable=False)
     delivery_window_id: Mapped[int] = mapped_column(ForeignKey("delivery_windows.id"), nullable=False)
+    delivery_batch_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_batches.id"), nullable=True, index=True)
     total_bani: Mapped[int] = mapped_column(Integer, nullable=False)
     subtotal_bani: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     delivery_fee_bani: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
@@ -102,6 +140,8 @@ class Order(Base):
     delivery_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="requested", server_default=text("'requested'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    demo_dataset_key: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
 
 class OrderItem(Base):
@@ -109,9 +149,14 @@ class OrderItem(Base):
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_order_items_quantity_positive"),
         CheckConstraint("unit_price_bani >= 0", name="ck_order_items_price_nonnegative"),
+        CheckConstraint("storage_type_snapshot IS NULL OR storage_type_snapshot IN ('fresh', 'chilled', 'frozen', 'pending_validation')", name="ck_order_items_storage_snapshot"),
+        CheckConstraint("net_weight_g_snapshot IS NULL OR net_weight_g_snapshot > 0", name="ck_order_items_weight_snapshot"),
     )
 
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), primary_key=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price_bani: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_type_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    net_weight_g_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_snapshot: Mapped[str | None] = mapped_column(String(30), nullable=True)
