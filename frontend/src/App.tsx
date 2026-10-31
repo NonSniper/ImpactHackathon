@@ -14,9 +14,9 @@ import {
 import { demoProducts, demoWindows, demoZones } from "./demo";
 import Admin from "./admin/Admin";
 import LocationPicker from "./components/LocationPicker";
+import FamilyMenuBuilder from "./components/family/FamilyMenuBuilder";
+import { draftFromCart, keyForMode, replaceMenu, type Allocation, type CartItem } from "./components/family/familyMenuState";
 
-type Allocation = { product_id: number; day_index: number; member_label: string; quantity: number };
-type CartItem = { product: Product; quantity: number; allocations?: Allocation[]; menu_days?: number };
 type Mode = "live" | "demo";
 type Confirmation = { order: OrderCreated; demo: boolean; group?: FulfillmentGroup; delivery_at?: string };
 const readConfirmation = (mode: Mode, group: FulfillmentGroup): Confirmation | null => {
@@ -200,29 +200,21 @@ export default function App() {
     const allocations = item.allocations.map((a, i) => i === index ? { ...a, quantity: next } : a).filter(a => a.quantity > 0);
     return { ...item, quantity: item.quantity - previous + next, allocations };
   }).filter(item => item.quantity > 0));
-  const addMenu = (allocations: Allocation[], days: number) => {
+  const addMenu = async (allocations: Allocation[], days: number) => {
     const ids = [...new Set(allocations.map(a => a.product_id))];
-    const chosen = ids.map(id => products.find(p => p.id === id)).filter((p): p is Product => Boolean(p));
-    if (group !== "meals" || chosen.length !== ids.length || chosen.some(p => !p.available || Boolean(p.demo_only) !== (mode === "demo") || p.fulfillment_group !== "meals" || p.storage_type !== "chilled" || p.preparation_level !== "ready") || (cart.length && cart[0].product.storage_type !== "chilled")) {
-      setNotice("Meniul necesită produse refrigerate compatibile din coșul de mese.");
+    const fresh = mode === "live" ? await api.products() : products;
+    if (mode === "live") setProducts(fresh);
+    const chosen = ids.map(id => fresh.find(p => p.id === id)).filter((p): p is Product => Boolean(p));
+    if (chosen.some(p => { const old = products.find(item => item.id === p.id); return !old || old.price_bani !== p.price_bani || old.storage_type !== p.storage_type || old.fulfillment_group !== p.fulfillment_group || old.preparation_level !== p.preparation_level; })) return false;
+    if (group !== "meals" || !allocations.length || chosen.length !== ids.length || chosen.some(p => !p.available || Boolean(p.demo_only) !== (mode === "demo") || p.fulfillment_group !== "meals" || p.product_type !== "individual_dish" || p.storage_type !== "chilled" || p.preparation_level !== "ready") || (cart.length && cart[0].product.storage_type !== "chilled")) return false;
+    if (chosen.some(p => { const item = cart.find(i => i.product.id === p.id); const ordinary = item ? item.quantity - (item.allocations || []).reduce((n, a) => n + a.quantity, 0) : 0; return ordinary > 0 && item && (item.product.price_bani !== p.price_bani || item.product.storage_type !== p.storage_type || item.product.fulfillment_group !== p.fulfillment_group); })) {
+      setNotice("Un produs obișnuit din coș are prețul sau condițiile schimbate. Verifică și actualizează coșul înainte de a salva meniul.");
       return false;
     }
-    if (chosen.some(p => (cart.find(i => i.product.id === p.id)?.quantity || 0) + allocations.filter(a => a.product_id === p.id).reduce((n, a) => n + a.quantity, 0) > 1000)) {
-      setNotice("Cantitatea maximă este 1000 per produs.");
-      return false;
-    }
-    setCart(items => {
-      const next = [...items];
-      for (const p of chosen) {
-        const selected = allocations.filter(a => a.product_id === p.id);
-        const quantity = selected.reduce((n, a) => n + a.quantity, 0);
-        const idx = next.findIndex(i => i.product.id === p.id);
-        if (idx < 0) next.push({ product: p, quantity, allocations: selected, menu_days: days });
-        else next[idx] = { ...next[idx], quantity: next[idx].quantity + quantity, allocations: [...(next[idx].allocations || []), ...selected], menu_days: Math.max(next[idx].menu_days || 0, days) };
-      }
-      return next;
-    });
-    setNotice("Meniul familiei a fost adăugat în coșul de mese.");
+    const next = replaceMenu(cart, allocations, days, chosen);
+    if (next.some(i => i.quantity > 1000)) return false;
+    setCart(() => next);
+    setNotice("Meniul familiei a fost salvat în coșul de mese.");
     return true;
   };
   const subtotal = cart.reduce(
@@ -413,7 +405,7 @@ export default function App() {
             selectGroup={setGroup}
           />
         )}
-        {path === "/familie" && (loading ? <p className="state">Se încarcă produsele…</p> : error ? <p role="alert" className="error">{error}</p> : <FamilyBuilder products={products.filter(p => p.fulfillment_group === "meals" && p.product_type === "individual_dish" && p.storage_type === "chilled" && p.preparation_level === "ready")} addMenu={addMenu} navigate={navigate} cartSubtotal={subtotal} />)}
+        {path === "/familie" && (loading ? <p className="state">Se încarcă produsele…</p> : error ? <p role="alert" className="error">{error}</p> : <FamilyMenuBuilder key={mode} mode={mode} products={products.filter(p => p.fulfillment_group === "meals" && p.product_type === "individual_dish" && p.storage_type === "chilled" && p.preparation_level === "ready")} addMenu={addMenu} navigate={navigate} cart={carts[mode].meals} />)}
         {(path === "/cos" || path === "/cos/congelate") && (
           <section className="container page narrow">
             <div className="page-heading">
@@ -443,6 +435,11 @@ export default function App() {
               navigate={navigate}
               group={group}
               changeAllocation={changeAllocation}
+              editMenu={() => {
+                if (sessionStorage.getItem(keyForMode(mode)) && !window.confirm("Deschizi meniul din coș? Ciorna curentă va fi înlocuită.")) return;
+                sessionStorage.setItem(keyForMode(mode), JSON.stringify(draftFromCart(cart)));
+                navigate("/familie");
+              }}
             />
           </section>
         )}
@@ -805,40 +802,6 @@ function ProductDetail({
     </section>
   );
 }
-function FamilyBuilder({ products, addMenu, navigate, cartSubtotal }: { products: Product[]; addMenu: (a: Allocation[], days: number) => boolean; navigate: (s: string) => void; cartSubtotal: number }) {
-  const [days, setDays] = useState(3);
-  const [members, setMembers] = useState(["Adult 1"]);
-  const [allocations, setAllocations] = useState<Allocation[]>([]);
-  const [selected, setSelected] = useState<Record<string, string>>({});
-  const [error, setError] = useState("");
-  const totals = allocations.reduce<Record<number, number>>((result, a) => ({ ...result, [a.product_id]: (result[a.product_id] || 0) + a.quantity }), {});
-  const cost = Object.entries(totals).reduce((sum, [id, q]) => sum + (products.find(p => p.id === Number(id))?.price_bani || 0) * q, 0);
-  function add(day: number, member: string) {
-    const id = Number(selected[`${day}-${member}`] || products[0]?.id);
-    if (!id) return;
-    setAllocations(old => {
-      const existing = old.find(a => a.product_id === id && a.day_index === day && a.member_label === member);
-      return existing ? old.map(a => a === existing ? { ...a, quantity: Math.min(1000, a.quantity + 1) } : a) : [...old, { product_id: id, day_index: day, member_label: member, quantity: 1 }];
-    });
-  }
-  return <section className="container page">
-    <div className="page-heading"><div><p className="overline">MENIUL FAMILIEI · COȘ MESE</p><h1>Creează meniul familiei tale</h1><p>Alege preparate pentru fiecare persoană și zi. Toate mesele sosesc într-o singură livrare refrigerată.</p></div></div>
-    <div className="family-steps" aria-label="Pașii meniului"><span>1. Perioada</span><span>2. Familia</span><span>3. Preparatele</span><span>4. Rezumat</span></div>
-    <section className="family-setup"><h2>1. Alege perioada</h2><p>Alege pentru câte zile pregătim meniul.</p><label>Număr de zile <select value={days} onChange={e => { const n = Number(e.target.value); setDays(n); setAllocations(old => old.filter(a => a.day_index <= n)); }}><option value={1}>1 zi</option><option value={2}>2 zile</option><option value={3}>3 zile</option></select></label></section>
-    <div className="form-stack family-setup"><h2>2. Adaugă membrii familiei</h2><p>Fiecare persoană își poate avea propriile preparate.</p>{members.map((member, i) => <div key={i}><label>Membru {i + 1}<input value={member} maxLength={60} onChange={e => { const next = e.target.value; setMembers(old => old.map((m, j) => j === i ? next : m)); setAllocations(old => old.map(a => a.member_label === member ? { ...a, member_label: next } : a)); }} /></label>{members.length > 1 && <button type="button" className="text-button" onClick={() => { setMembers(old => old.filter((_, j) => j !== i)); setAllocations(old => old.filter(a => a.member_label !== member)); }}>Elimină membrul și selecțiile</button>}</div>)}<button type="button" className="button-outline" onClick={() => setMembers(old => [...old, `Membru ${old.length + 1}`])}>Adaugă membru</button></div>
-    <div className="family-section-heading"><h2>3. Alege preparatele</h2><p>Adaugă porții pentru fiecare persoană și zi.</p></div>
-    {!products.length && <p>Nu sunt preparate compatibile disponibile în acest moment.</p>}
-    {Array.from({ length: days }, (_, index) => index + 1).map(day => <section className="admin-section family-day" key={day}><h2>Ziua {day}</h2><p>Subtotal zi: {money(allocations.filter(a => a.day_index === day).reduce((sum, a) => sum + (products.find(p => p.id === a.product_id)?.price_bani || 0) * a.quantity, 0))}</p>{members.map((member, index) => <div className="detail-panel" key={index}><h3>{member || `Membru ${index + 1}`}</h3>{allocations.filter(a => a.day_index === day && a.member_label === member).map((a, i) => <p key={`${a.product_id}-${i}`}>{products.find(p => p.id === a.product_id)?.name || `Produs #${a.product_id}`} <label>Cantitate <input type="number" min="1" max="1000" step="1" value={a.quantity} onChange={e => setAllocations(old => old.map(item => item === a ? { ...item, quantity: Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value)) || 1)) } : item))} /></label> <button className="text-button" type="button" onClick={() => setAllocations(old => old.filter(item => item !== a))}>Elimină</button></p>)}<FamilyMealPreview product={products.find(p => p.id === Number(selected[`${day}-${member}`])) || products[0]} /><label>Preparat<select value={selected[`${day}-${member}`] || ""} onChange={e => setSelected({ ...selected, [`${day}-${member}`]: e.target.value })}><option value="">Alege preparatul</option>{products.map(p => <option value={p.id} key={p.id}>{p.name} · {money(p.price_bani)}</option>)}</select></label><button type="button" disabled={!products.length} onClick={() => add(day, member)}>Adaugă o porție</button></div>)}</section>)}
-    <section className="cart-summary family-summary"><h2>4. Verifică meniul</h2><p>{days} zile · {members.length} membri · {allocations.reduce((n, a) => n + a.quantity, 0)} porții</p>{Object.entries(totals).map(([id, q]) => <p key={id}>{products.find(p => p.id === Number(id))?.name}: {q}</p>)}<p>Meniu: {money(cost)} · Subtotal coș estimat: {money(cartSubtotal + cost)}</p><strong>{money(cartSubtotal + cost)}</strong><p>Mai ai nevoie de {money(Math.max(0, 60000 - cartSubtotal - cost))} pentru minimul de 600 MDL al coșului de mese. Congelatele se comandă separat.</p>{error && <p role="alert" className="error">{error}</p>}<button type="button" onClick={() => { if (!allocations.length || members.some(m => !m.trim()) || new Set(members.map(m => m.trim())).size !== members.length) { setError("Adaugă preparate și etichete distincte pentru membrii familiei."); return; } if (addMenu(allocations, days)) navigate("/cos"); }}>Adaugă meniul în coș</button></section>
-  </section>;
-}
-function FamilyMealPreview({ product }: { product?: Product }) {
-  if (!product) return null;
-  return <figure className="family-meal-preview">
-    <FoodImage src={product.image_preview_url} alt={`Fotografie ilustrativă: ${product.name}`} fallback={<div className="family-meal-placeholder" aria-hidden="true">CREDEM</div>} />
-    <figcaption><strong>{product.name}</strong><span>{money(product.price_bani)} · fotografie ilustrativă</span>{product.image_preview_url?.includes("vegetable-soup.jpg") && <small>Foto: <a href="https://commons.wikimedia.org/wiki/File:Vegetable_soup_and_bread_at_the_office.jpg">JIP</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></small>}</figcaption>
-  </figure>;
-}
 function Cart({
   cart,
   change,
@@ -847,6 +810,7 @@ function Cart({
   navigate,
   group,
   changeAllocation,
+  editMenu,
 }: {
   cart: CartItem[];
   change: (id: number, q: number) => void;
@@ -855,6 +819,7 @@ function Cart({
   navigate: (s: string) => void;
   group: FulfillmentGroup;
   changeAllocation: (productId: number, index: number, quantity: number) => void;
+  editMenu: () => void;
 }) {
   return cart.length ? (
     <>
@@ -869,7 +834,7 @@ function Cart({
               <small>
                 {storageLabel[p.storage_type]} · {money(p.price_bani)}
               </small>
-              {allocations?.map((a, index) => <small key={index}>Ziua {a.day_index} · {a.member_label}: <input aria-label={`Cantitate ${p.name}, ziua ${a.day_index}, ${a.member_label}`} type="number" min="0" max="1000" value={a.quantity} onChange={e => changeAllocation(p.id, index, Number(e.target.value))} /></small>)}
+              {allocations?.map((a, index) => <small key={index}>Ziua {a.day_index} · {a.member_label} · {a.meal_period === "breakfast" ? "Mic dejun" : a.meal_period === "lunch" ? "Prânz" : a.meal_period === "dinner" ? "Cină" : "Fără categorie"}: <input aria-label={`Cantitate ${p.name}, ziua ${a.day_index}, ${a.member_label}`} type="number" min="0" max="1000" value={a.quantity} onChange={e => changeAllocation(p.id, index, Number(e.target.value))} /></small>)}
               <button className="text-button" onClick={() => change(p.id, 0)}>
                 Elimină
               </button>
@@ -893,6 +858,7 @@ function Cart({
           </div>
         ))}
       </div>
+      {group === "meals" && cart.some(item => item.allocations?.length) && <button type="button" className="button-outline" onClick={editMenu}>Editează meniul familiei</button>}
       <button className="text-button" onClick={clear}>
         Golește coșul pentru o comandă separată
       </button>

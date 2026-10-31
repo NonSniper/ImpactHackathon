@@ -32,6 +32,26 @@ def test_populated_legacy_migration_preserves_history_and_requires_classificatio
         assert db.execute("SELECT reserved_orders,fulfillment_group FROM delivery_windows").fetchone() == (1, None)
 
 
+def test_populated_0013_allocation_keeps_unclassified_period(tmp_path):
+    backend_dir = Path(__file__).resolve().parents[1]
+    db_file = tmp_path / "allocation.db"
+    env = os.environ | {"DATABASE_URL": f"sqlite:///{db_file}"}
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "0013"], cwd=backend_dir, env=env, check=True, capture_output=True)
+    with sqlite3.connect(db_file) as db:
+        db.execute("INSERT INTO products(id,name,description,category,price_bani,storage_type,available,demo_only) VALUES(1,'Legacy','Test','test',65000,'chilled',1,0)")
+        db.execute("INSERT INTO delivery_zones(id,city,neighborhood,active) VALUES(1,'Test','Test',1)")
+        db.execute("INSERT INTO delivery_windows(id,zone_id,delivery_at,ordering_cutoff,reserved_orders) VALUES(1,1,'2099-01-03','2099-01-02',1)")
+        db.execute("INSERT INTO orders(id,customer_name,phone,address,zone_id,delivery_window_id,total_bani,subtotal_bani) VALUES(1,'Test','060000000','Test',1,1,65000,65000)")
+        db.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_bani,custom_quantity) VALUES(1,1,1,65000,1)")
+        db.execute("INSERT INTO menu_allocations(order_id,product_id,product_name_snapshot,day_index,member_label,quantity) VALUES(1,1,'Legacy',1,'Adult 1',1)")
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=backend_dir, env=env, check=True, capture_output=True)
+    with sqlite3.connect(db_file) as db:
+        assert db.execute("SELECT product_name_snapshot,quantity,meal_period FROM menu_allocations").fetchone() == ("Legacy", 1, None)
+        import pytest
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE menu_allocations SET meal_period='brunch'")
+
+
 def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
     backend_dir = Path(__file__).resolve().parents[1]
     database_url = f"sqlite:///{tmp_path / 'migrated.db'}"

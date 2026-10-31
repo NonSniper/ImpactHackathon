@@ -594,7 +594,7 @@ function Orders({
                   <strong>{money(i.line_total_bani)}</strong>
                 </p>
               ))}
-              {Boolean(detail.allocations?.length) && <><h3>Meniul familiei · {detail.menu_days} zile</h3>{detail.allocations?.map((a, index) => <p key={index}>Ziua {a.day_index} · {a.member_label}: {a.product_name_snapshot} × {a.quantity}</p>)}</>}
+              {Boolean(detail.allocations?.length) && <><h3>Meniul familiei · {detail.menu_days} zile</h3>{detail.allocations?.map((a, index) => <p key={index}>Ziua {a.day_index} · {a.member_label} · {a.meal_period === "breakfast" ? "Mic dejun" : a.meal_period === "lunch" ? "Prânz" : a.meal_period === "dinner" ? "Cină" : "Fără categorie"}: {a.product_name_snapshot} × {a.quantity}</p>)}</>}
               <p>Livrare: {money(detail.delivery_fee_bani)}</p>
               <p>
                 <strong>Total solicitat: {money(detail.total_bani)}</strong>

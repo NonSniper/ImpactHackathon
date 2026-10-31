@@ -177,7 +177,7 @@ def create_order(payload: OrderCreate, db: Annotated[Session, Depends(get_db)]) 
                               custom_quantity=item.custom_quantity) for item in payload.items])
         db.flush()
         db.add_all([MenuAllocation(order_id=order.id, product_id=a.product_id, day_index=a.day_index,
-                                   member_label=a.member_label, quantity=a.quantity,
+                                   member_label=a.member_label, quantity=a.quantity, meal_period=a.meal_period,
                                    product_name_snapshot=products[a.product_id].name) for a in payload.allocations])
         db.commit()
     except Exception:

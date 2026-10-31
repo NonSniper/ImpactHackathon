@@ -227,35 +227,45 @@ test("a frozen product direct link selects the correct cart after refresh", asyn
   await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toHaveAttribute("href", "/cos/congelate");
 });
 
-test("family builder previews the selected dish photo", async ({ page }) => {
+async function startFamilyMeals(page: Page, days = 1) {
+  await page.goto("/familie");
+  await page.getByRole("button", { name: "Continuă → Alege zilele" }).click();
+  await page.getByRole("button", { name: `${days} ${days === 1 ? "zi" : "zile"}` }).click();
+  await page.getByRole("button", { name: "Continuă → Alege mesele" }).click();
+}
+function mealSlot(page: Page, name: string) {
+  return page.locator(".family-slot").filter({ has: page.getByRole("heading", { name, exact: true }) });
+}
+
+test("family picker requires an intentional choice and shows dish photos", async ({ page }) => {
   const data = state();
   data.products = [
     { ...product, id: 10, name: "Supă test", product_type: "individual_dish", plan_duration_days: null, image_preview_url: "/images/examples/vegetable-soup.jpg" },
     { ...product, id: 11, name: "Sarmale test", product_type: "individual_dish", plan_duration_days: null, image_preview_url: "/images/examples/sarmale-demo.webp" },
   ];
   await mockPublic(page, data);
-  await page.goto("/familie");
-  const day = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ziua 1", exact: true }) }).last();
-  await expect(day.getByAltText("Fotografie ilustrativă: Supă test")).toBeVisible();
-  await day.getByLabel("Preparat").selectOption("11");
-  await expect(day.getByAltText("Fotografie ilustrativă: Sarmale test")).toHaveAttribute("src", "/images/examples/sarmale-demo.webp");
+  await startFamilyMeals(page);
+  await expect(page.locator(".family-selected")).toHaveCount(0);
+  await mealSlot(page, "Mic dejun").getByRole("button", { name: "Adaugă preparat" }).click();
+  await expect(page.getByAltText("Fotografie ilustrativă: Supă test")).toBeVisible();
+  await expect(page.getByAltText("Fotografie ilustrativă: Sarmale test")).toBeVisible();
+  await mealSlot(page, "Mic dejun").getByRole("button", { name: "Adaugă Sarmale test" }).click();
+  await expect(page.locator(".family-selected")).toHaveCount(1);
 });
 
 test("family allocations reach checkout as metadata on one aggregate item", async ({ page }) => {
   const data = state();
   data.products = [{ ...product, product_type: "individual_dish", name: "Preparat familie", price_bani: 30000, plan_duration_days: null }];
   await mockPublic(page, data);
-  await page.goto("/familie");
-  await page.getByLabel("Număr de zile").selectOption("2");
-  const day1 = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ziua 1", exact: true }) }).last();
-  const day2 = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ziua 2", exact: true }) }).last();
-  await day1.getByRole("button", { name: "Adaugă o porție" }).click();
-  await day2.getByRole("button", { name: "Adaugă o porție" }).click();
+  await startFamilyMeals(page, 2);
+  await mealSlot(page, "Mic dejun").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Mic dejun").getByRole("button", { name: "Adaugă Preparat familie" }).click();
+  await page.getByRole("button", { name: "Salvează și continuă" }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă Preparat familie" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
   await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
   await expect(page.locator(".cart-summary")).toContainText("600,00 MDL");
-  await page.getByLabel("Cantitate Preparat familie, ziua 1, Adult 1").fill("2");
-  await expect(page.locator(".cart-summary")).toContainText("900,00 MDL");
-  await page.getByLabel("Cantitate Preparat familie, ziua 1, Adult 1").fill("1");
   await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
   await page.getByLabel("Nume și prenume").fill("Client Test");
   await page.getByLabel("Telefon").fill("+37360000000");
@@ -266,8 +276,75 @@ test("family allocations reach checkout as metadata on one aggregate item", asyn
   await page.getByRole("button", { name: "Trimite cererea" }).click();
   await expect(page.locator(".receipt")).toBeVisible();
   expect(data.lastOrder.items).toEqual([{ product_id: 1, quantity: 2, custom_quantity: 2 }]);
-  expect(data.lastOrder.allocations).toHaveLength(2);
+  expect(data.lastOrder.allocations.map((a: any) => a.meal_period)).toEqual(["breakfast", "dinner"]);
   expect(data.lastOrder.menu_days).toBe(2);
+});
+
+test("draft supports members, skipped meals, multiple dishes and safe shortening", async ({ page }) => {
+  const data = state();
+  data.products = [ { ...product, id: 10, name: "Supă", product_type: "individual_dish", plan_duration_days: null }, { ...product, id: 11, name: "Orez", product_type: "individual_dish", plan_duration_days: null } ];
+  await mockPublic(page, data);
+  await page.goto("/familie");
+  await page.getByRole("button", { name: "+ Adaugă membru" }).click();
+  await page.getByLabel("Membru 2").fill("Copil 1");
+  await page.getByRole("button", { name: "Continuă → Alege zilele" }).click();
+  await page.getByRole("button", { name: "2 zile" }).click();
+  await page.getByRole("button", { name: "Continuă → Alege mesele" }).click();
+  await mealSlot(page, "Mic dejun").getByRole("button", { name: "Sari peste această masă" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Supă" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Orez" }).click();
+  await page.reload();
+  await expect(mealSlot(page, "Mic dejun")).toContainText("Omisă");
+  await expect(mealSlot(page, "Prânz").locator(".family-selected")).toHaveCount(2);
+  await page.getByRole("button", { name: "Ziua 2", exact: true }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă Orez" }).click();
+  await page.getByRole("button", { name: "Înapoi" }).click();
+  await page.getByRole("button", { name: "Înapoi" }).click();
+  await page.getByRole("button", { name: "Înapoi" }).click();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "1 zi" }).click();
+  await expect(page.getByRole("button", { name: "2 zile" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Înapoi la familie" }).click();
+  await page.getByLabel("Membru 1").fill("Adult nou");
+  await page.getByRole("button", { name: "Continuă → Alege zilele" }).click();
+  await page.getByRole("button", { name: "Continuă → Alege mesele" }).click();
+  await expect(page.getByRole("heading", { name: "Pregătim meniul pentru Adult nou" })).toBeVisible();
+  await expect(mealSlot(page, "Prânz").locator(".family-selected")).toHaveCount(2);
+});
+
+test("editing a menu replaces custom quantities and preserves ordinary items", async ({ page }) => {
+  const data = state();
+  data.products = [{ ...product, product_type: "individual_dish", name: "Preparat familie", price_bani: 30000, plan_duration_days: null }];
+  await mockPublic(page, data);
+  await page.goto("/catalog");
+  await page.getByRole("button", { name: "Adaugă Preparat familie în coș" }).click();
+  await startFamilyMeals(page);
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Preparat familie" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.locator(".cart-summary")).toContainText("600,00 MDL");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Editează meniul familiei" }).click();
+  await page.locator(".family-agenda-row").filter({ hasText: "Prânz" }).getByRole("button", { name: "Editează" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Preparat familie" }).click();
+  await page.getByRole("button", { name: "Anulează editarea" }).click();
+  await expect(page.locator(".cart-summary")).toContainText("600,00 MDL");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Editează meniul familiei" }).click();
+  await page.locator(".family-agenda-row").filter({ hasText: "Prânz" }).getByRole("button", { name: "Editează" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Preparat familie" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.locator(".cart-summary")).toContainText("900,00 MDL");
+  const cart = await page.evaluate(() => JSON.parse(sessionStorage.getItem("credem-cart-live-meals")!));
+  expect(cart[0].quantity).toBe(3);
+  expect(cart[0].allocations.reduce((n: number, a: any) => n + a.quantity, 0)).toBe(2);
+  expect(await page.evaluate(() => sessionStorage.getItem("credem-cart-live-frozen"))).toBeNull();
 });
 
 test("denied device location leaves manual map pin available", async ({ page }) => {
@@ -563,4 +640,119 @@ test("failed order preserves cart; successful receipt survives refresh", async (
   expect(stored).not.toContain("Client Test");
   expect(stored).not.toContain("+37360000000");
   expect(stored).not.toContain("Adresă fictivă");
+});
+
+test("family draft is isolated by mode and survives navigation", async ({ page }) => {
+  const data = state();
+  data.products = [{ ...product, product_type: "individual_dish", name: "Preparat live", plan_duration_days: null }];
+  await mockPublic(page, data);
+  await startFamilyMeals(page);
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Preparat live" }).click();
+  await page.getByRole("button", { name: "Încearcă demo" }).click();
+  await expect(page.getByRole("heading", { name: "Cine va mânca?" })).toBeVisible();
+  await page.getByLabel("Membru 1").fill("Demo adult");
+  await page.getByRole("button", { name: "Ieși din demo" }).click();
+  await expect(page.getByRole("heading", { name: "Pregătim meniul pentru Adult 1" })).toBeVisible();
+  await expect(mealSlot(page, "Prânz")).toContainText("Preparat live");
+  await page.goto("/catalog");
+  await page.goto("/familie");
+  await expect(mealSlot(page, "Prânz")).toContainText("Preparat live");
+  const stored = await page.evaluate(() => ({ live: sessionStorage.getItem("credem-family-draft-live"), demo: sessionStorage.getItem("credem-family-draft-demo") }));
+  expect(stored.live).toContain("Preparat live");
+  expect(stored.demo).toContain("Demo adult");
+  expect(stored.demo).not.toContain("Preparat live");
+});
+
+test("family draft retains removed products and rechecks changed prices before cart", async ({ page }) => {
+  const data = state();
+  const dish = { ...product, product_type: "individual_dish", name: "Preparat live", plan_duration_days: null };
+  data.products = [dish];
+  await mockPublic(page, data);
+  await startFamilyMeals(page);
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Prânz").getByRole("button", { name: "Adaugă Preparat live" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
+  data.products = [{ ...dish, price_bani: 70000 }];
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.getByRole("alert").first()).toContainText("Prețul");
+  await page.getByRole("button", { name: "Acceptă prețurile actualizate" }).click();
+  data.products = [];
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.getByText("Unele preparate nu mai sunt disponibile", { exact: false })).toBeVisible();
+  expect(await page.evaluate(() => sessionStorage.getItem("credem-family-draft-live"))).toContain("Preparat live");
+  expect(await page.evaluate(() => sessionStorage.getItem("credem-cart-live-meals"))).toBeNull();
+});
+
+test("adding a menu never silently changes an ordinary cart item's stale price", async ({ page }) => {
+  const data = state();
+  const dish = { ...product, product_type: "individual_dish", name: "Preparat live", price_bani: 30000, plan_duration_days: null };
+  data.products = [dish];
+  await mockPublic(page, data);
+  await page.goto("/catalog");
+  await page.getByRole("button", { name: "Adaugă Preparat live în coș" }).click();
+  data.products = [{ ...dish, price_bani: 35000 }];
+  await startFamilyMeals(page);
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă Preparat live" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.getByText("Un produs obișnuit din coș", { exact: false })).toBeVisible();
+  const cart = await page.evaluate(() => JSON.parse(sessionStorage.getItem("credem-cart-live-meals")!));
+  expect(cart[0].product.price_bani).toBe(30000);
+  expect(cart[0].quantity).toBe(1);
+  await page.goto("/cos");
+  await page.getByRole("button", { name: "Actualizează produsele disponibile" }).click();
+  await page.goto("/familie");
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.locator(".cart-summary")).toContainText("700,00 MDL");
+});
+
+test("three-day review switches members and asks before removing selected members", async ({ page }) => {
+  const data = state();
+  data.products = [{ ...product, product_type: "individual_dish", name: "Supă", plan_duration_days: null }];
+  await mockPublic(page, data);
+  await page.goto("/familie");
+  await page.getByRole("button", { name: "+ Adaugă membru" }).click();
+  await page.getByLabel("Membru 2").fill("Copil 1");
+  await page.getByRole("button", { name: "Continuă → Alege zilele" }).click();
+  await page.getByRole("button", { name: "3 zile" }).click();
+  await page.getByRole("button", { name: "Continuă → Alege mesele" }).click();
+  await page.getByRole("button", { name: "Copil 1", exact: true }).click();
+  await page.getByRole("button", { name: "Ziua 3", exact: true }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă preparat" }).click();
+  await mealSlot(page, "Cină").getByRole("button", { name: "Adaugă Supă" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
+  await expect(page.locator(".family-agenda").filter({ hasText: "Ziua 3" })).toContainText("Supă ×1");
+  await page.getByRole("button", { name: "După zi" }).click();
+  await expect(page.locator(".family-agenda").filter({ hasText: "Copil 1" })).toContainText("Supă ×1");
+  await page.getByRole("button", { name: "Editează familia" }).click();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.locator(".family-member").filter({ has: page.getByLabel("Membru 2") }).getByRole("button", { name: "Elimină" }).click();
+  await expect(page.getByLabel("Membru 2")).toHaveValue("Copil 1");
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator(".family-member").filter({ has: page.getByLabel("Membru 2") }).getByRole("button", { name: "Elimină" }).click();
+  await expect(page.getByLabel("Membru 2")).toHaveCount(0);
+});
+
+test("legacy family allocations stay unclassified until the customer assigns a period", async ({ page }) => {
+  const data = state();
+  const dish = { ...product, product_type: "individual_dish", name: "Preparat vechi", price_bani: 60000, plan_duration_days: null };
+  data.products = [dish];
+  await mockPublic(page, data);
+  await page.addInitScript(item => sessionStorage.setItem("credem-cart-live-meals", JSON.stringify([{ product: item, quantity: 2, menu_days: 1, allocations: [{ product_id: 1, day_index: 1, member_label: "Adult 1", quantity: 1 }, { product_id: 1, day_index: 1, member_label: "Adult 1", quantity: 1 }] }])), dish);
+  await page.goto("/cos");
+  await expect(page.getByText("Fără categorie", { exact: false })).toHaveCount(2);
+  await page.getByRole("button", { name: "Editează meniul familiei" }).click();
+  await expect(page.locator(".family-agenda")).toContainText("Fără categorie");
+  await page.locator(".family-agenda-row").filter({ hasText: "Fără categorie" }).getByRole("button", { name: "Editează" }).click();
+  await expect(mealSlot(page, "Fără categorie").locator(".family-selected")).toHaveCount(1);
+  await mealSlot(page, "Fără categorie").getByRole("button", { name: "Mic dejun" }).click();
+  await page.getByRole("button", { name: "Verifică meniul familiei" }).click();
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.getByText("Mic dejun", { exact: false })).toBeVisible();
+  const cart = await page.evaluate(() => JSON.parse(sessionStorage.getItem("credem-cart-live-meals")!));
+  expect(cart[0].quantity).toBe(2);
+  expect(cart[0].allocations[0].meal_period).toBe("breakfast");
+  expect(cart[0].allocations[0].quantity).toBe(2);
 });

@@ -1,3 +1,4 @@
+export type MealPeriod = "breakfast" | "lunch" | "dinner";
 export type StorageType = "fresh" | "chilled" | "frozen" | "pending_validation";
 export type FulfillmentGroup = "meals" | "frozen";
 export type Product = {
@@ -64,7 +65,7 @@ export type Order = {
 };
 export type OrderDetail = Order & {
   menu_days?: number | null;
-  allocations?: { product_id: number; product_name_snapshot: string; day_index: number; member_label: string; quantity: number }[];
+  allocations?: { product_id: number; product_name_snapshot: string; day_index: number; member_label: string; quantity: number; meal_period?: MealPeriod | null }[];
   phone: string;
   address: string;
   latitude: number | null;
@@ -166,7 +167,7 @@ export type OrderInput = {
   delivery_instructions: string | null;
   items: { product_id: number; quantity: number; custom_quantity: number }[];
   menu_days: number | null;
-  allocations: { product_id: number; day_index: number; member_label: string; quantity: number }[];
+  allocations: { product_id: number; day_index: number; member_label: string; quantity: number; meal_period?: MealPeriod | null }[];
 };
 
 const base = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "") + "/api";

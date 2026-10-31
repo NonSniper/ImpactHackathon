@@ -230,6 +230,7 @@ class OrderItemCreate(BaseModel):
 
 
 class MenuAllocationInput(BaseModel):
+    meal_period: Literal["breakfast", "lunch", "dinner"] | None = None
     product_id: int = Field(strict=True, gt=0)
     day_index: int = Field(strict=True, ge=1, le=3)
     member_label: str = Field(min_length=1, max_length=60)
@@ -372,6 +373,7 @@ class AdminOrderItem(BaseModel):
 
 
 class MenuAllocationRead(BaseModel):
+    meal_period: Literal["breakfast", "lunch", "dinner"] | None = None
     model_config = ConfigDict(from_attributes=True)
     product_id: int
     product_name_snapshot: str

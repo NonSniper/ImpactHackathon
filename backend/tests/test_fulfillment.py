@@ -66,14 +66,17 @@ def test_plan_price_and_family_allocations_are_not_double_counted(client):
         db.commit()
     assert api.post("/api/orders", json=order("meals", 6)).status_code == 400
     payload = order("meals", 2, menu_days=2, items=[{"product_id": 2, "quantity": 2, "custom_quantity": 2}],
-                    allocations=[{"product_id": 2, "day_index": 1, "member_label": "Adult 1", "quantity": 1},
-                                 {"product_id": 2, "day_index": 2, "member_label": "Copil 1", "quantity": 1}])
+                    allocations=[{"product_id": 2, "day_index": 1, "member_label": "Adult 1", "quantity": 1, "meal_period": "breakfast"},
+                                 {"product_id": 2, "day_index": 2, "member_label": "Copil 1", "quantity": 1, "meal_period": "dinner"}])
     assert api.post("/api/orders", json=payload | {"allocations": payload["allocations"][:1]}).status_code == 422
+    invalid = [{**payload["allocations"][0], "meal_period": "brunch"}, payload["allocations"][1]]
+    assert api.post("/api/orders", json=payload | {"allocations": invalid}).status_code == 422
     result = api.post("/api/orders", json=payload)
     assert result.status_code == 201
     headers = {"Authorization": "Bearer test-secret"}
     detail = api.get(f"/api/admin/orders/{result.json()['id']}", headers=headers).json()
     assert len(detail["allocations"]) == 2 and detail["items"][0]["quantity"] == 2
+    assert [a["meal_period"] for a in detail["allocations"]] == ["breakfast", "dinner"]
     batch = api.post("/api/admin/batches", headers=headers, json={"zone_id": 1, "delivery_window_id": 1, "order_ids": [result.json()["id"]]}).json()
     production = api.get(f"/api/admin/batches/{batch['id']}/production", headers=headers).json()
     finance = api.get(f"/api/admin/batches/{batch['id']}/financial-summary", headers=headers).json()
@@ -92,6 +95,7 @@ def test_allocation_can_coexist_with_ordinary_quantity_but_must_match_custom_qua
     detail = api.get(f"/api/admin/orders/{result.json()['id']}", headers={"Authorization": "Bearer test-secret"}).json()
     assert detail["menu_days"] == 3 and detail["items"][0]["quantity"] == 2
     assert detail["items"][0]["custom_quantity"] == 1 and len(detail["allocations"]) == 1
+    assert detail["allocations"][0]["meal_period"] is None
 
 
 def test_group_is_required_and_plan_approval_enforces_price(client):

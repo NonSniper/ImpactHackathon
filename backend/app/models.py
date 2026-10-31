@@ -176,6 +176,7 @@ class MenuAllocation(Base):
         ForeignKeyConstraint(["order_id", "product_id"], ["order_items.order_id", "order_items.product_id"]),
         CheckConstraint("day_index BETWEEN 1 AND 3", name="ck_allocations_day"),
         CheckConstraint("quantity > 0", name="ck_allocations_quantity"),
+        CheckConstraint("meal_period IS NULL OR meal_period IN ('breakfast', 'lunch', 'dinner')", name="ck_allocations_meal_period"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -183,4 +184,5 @@ class MenuAllocation(Base):
     product_name_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
     day_index: Mapped[int] = mapped_column(Integer, nullable=False)
     member_label: Mapped[str] = mapped_column(String(60), nullable=False)
+    meal_period: Mapped[str | None] = mapped_column(String(10), nullable=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
