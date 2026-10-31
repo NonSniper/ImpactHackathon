@@ -9,20 +9,28 @@ import {
   type Product,
   type Window,
   type Zone,
+  type FulfillmentGroup,
 } from "./api";
 import { demoProducts, demoWindows, demoZones } from "./demo";
 import Admin from "./admin/Admin";
 import LocationPicker from "./components/LocationPicker";
 
-type CartItem = { product: Product; quantity: number };
+type Allocation = { product_id: number; day_index: number; member_label: string; quantity: number };
+type CartItem = { product: Product; quantity: number; allocations?: Allocation[]; menu_days?: number };
 type Mode = "live" | "demo";
-type Confirmation = { order: OrderCreated; demo: boolean };
-const readCart = (mode: Mode): CartItem[] => {
+type Confirmation = { order: OrderCreated; demo: boolean; group?: FulfillmentGroup; delivery_at?: string };
+const readConfirmation = (mode: Mode, group: FulfillmentGroup): Confirmation | null => {
   try {
-    const data = JSON.parse(
-      sessionStorage.getItem(`credem-cart-${mode}`) || "[]",
-    );
-    return Array.isArray(data) ? data : [];
+    const stored = sessionStorage.getItem(`credem-confirmation-${mode}-${group}`) || (group === "meals" ? sessionStorage.getItem("credem-confirmation") : null);
+    const value = stored ? JSON.parse(stored) as Confirmation : null;
+    return value && value.demo === (mode === "demo") ? value : null;
+  } catch { return null; }
+};
+const readCart = (mode: Mode, group: FulfillmentGroup): CartItem[] => {
+  try {
+    const saved = sessionStorage.getItem(`credem-cart-${mode}-${group}`);
+    const data = JSON.parse(saved || sessionStorage.getItem(`credem-cart-${mode}`) || "[]");
+    return Array.isArray(data) ? (saved ? data : data.filter((item: CartItem) => (item.product.fulfillment_group || "meals") === group)) : [];
   } catch {
     return [];
   }
@@ -57,43 +65,45 @@ function Icon({ name }: { name: "bag" | "arrow" | "plus" | "minus" }) {
 }
 export default function App() {
   const [path, setPath] = useState(location.pathname);
+  const [group, setGroup] = useState<FulfillmentGroup>(() => location.pathname.includes("congelate") ? "frozen" : "meals");
   const navigate = useCallback((url: string) => {
+    if (url.includes("congelate")) setGroup("frozen");
+    else if (["/planuri", "/catalog", "/familie", "/cos", "/checkout", "/cerere-trimisa"].includes(url)) setGroup("meals");
     history.pushState({}, "", url);
     setPath(url);
     window.scrollTo(0, 0);
   }, []);
   useEffect(() => {
-    const fn = () => setPath(location.pathname);
+    const fn = () => {
+      setPath(location.pathname);
+      if (location.pathname.includes("congelate")) setGroup("frozen");
+      else if (["/planuri", "/catalog", "/familie", "/cos", "/checkout", "/cerere-trimisa"].includes(location.pathname)) setGroup("meals");
+    };
     window.addEventListener("popstate", fn);
     return () => window.removeEventListener("popstate", fn);
   }, []);
   const [mode, setMode] = useState<Mode>(() =>
     sessionStorage.getItem("credem-mode") === "demo" ? "demo" : "live",
   );
-  const [carts, setCarts] = useState<Record<Mode, CartItem[]>>(() => ({
-    live: readCart("live"),
-    demo: readCart("demo"),
+  const [carts, setCarts] = useState<Record<Mode, Record<FulfillmentGroup, CartItem[]>>>(() => ({
+    live: { meals: readCart("live", "meals"), frozen: readCart("live", "frozen") },
+    demo: { meals: readCart("demo", "meals"), frozen: readCart("demo", "frozen") },
   }));
-  const cart = carts[mode];
+  const cart = carts[mode][group];
   const setCart = (fn: (current: CartItem[]) => CartItem[]) =>
     setCarts((current) => {
-      const next = fn(current[mode]);
-      sessionStorage.setItem(`credem-cart-${mode}`, JSON.stringify(next));
-      return { ...current, [mode]: next };
+      const next = fn(current[mode][group]);
+      sessionStorage.setItem(`credem-cart-${mode}-${group}`, JSON.stringify(next));
+      return { ...current, [mode]: { ...current[mode], [group]: next } };
     });
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [result, setResult] = useState<Confirmation | null>(() => {
-    try {
-      return JSON.parse(
-        sessionStorage.getItem("credem-confirmation") || "null",
-      );
-    } catch {
-      return null;
-    }
-  });
+  const [result, setResult] = useState<Confirmation | null>(() => readConfirmation(mode, group));
+  useEffect(() => {
+    setResult(readConfirmation(mode, group));
+  }, [mode, group]);
   useEffect(() => {
     let active = true;
     setError("");
@@ -122,6 +132,14 @@ export default function App() {
   }, [mode]);
   const add = (product: Product, quantity = 1) => {
     setNotice("");
+    if (!product.available || Boolean(product.demo_only) !== (mode === "demo")) {
+      setNotice("Produsul nu este disponibil în acest mod.");
+      return;
+    }
+    if (product.fulfillment_group !== group) {
+      setNotice("Acest produs aparține celuilalt coș. Comenzile se trimit separat.");
+      return;
+    }
     if (product.storage_type === "pending_validation") {
       setNotice(
         "Acest produs este în curs de verificare și nu poate fi comandat.",
@@ -151,7 +169,7 @@ export default function App() {
       items
         .map((i) =>
           i.product.id === id
-            ? { ...i, quantity: Math.max(0, Math.min(1000, quantity)) }
+            ? { ...i, quantity: quantity === 0 ? 0 : Math.max(i.allocations?.reduce((n, a) => n + a.quantity, 0) || 1, Math.min(1000, quantity)) }
             : i,
         )
         .filter((i) => i.quantity > 0),
@@ -165,11 +183,45 @@ export default function App() {
       })),
     );
   };
+  const changeAllocation = (productId: number, index: number, quantity: number) => setCart(items => items.map(item => {
+    if (item.product.id !== productId || !item.allocations?.[index]) return item;
+    const previous = item.allocations[index].quantity;
+    const next = Math.max(0, Math.min(1000 - (item.quantity - previous), Math.trunc(quantity) || 0));
+    const allocations = item.allocations.map((a, i) => i === index ? { ...a, quantity: next } : a).filter(a => a.quantity > 0);
+    return { ...item, quantity: item.quantity - previous + next, allocations };
+  }).filter(item => item.quantity > 0));
+  const addMenu = (allocations: Allocation[], days: number) => {
+    const ids = [...new Set(allocations.map(a => a.product_id))];
+    const chosen = ids.map(id => products.find(p => p.id === id)).filter((p): p is Product => Boolean(p));
+    if (group !== "meals" || chosen.length !== ids.length || chosen.some(p => !p.available || Boolean(p.demo_only) !== (mode === "demo") || p.fulfillment_group !== "meals" || p.storage_type !== "chilled" || p.preparation_level !== "ready") || (cart.length && cart[0].product.storage_type !== "chilled")) {
+      setNotice("Meniul necesită produse refrigerate compatibile din coșul de mese.");
+      return false;
+    }
+    if (chosen.some(p => (cart.find(i => i.product.id === p.id)?.quantity || 0) + allocations.filter(a => a.product_id === p.id).reduce((n, a) => n + a.quantity, 0) > 1000)) {
+      setNotice("Cantitatea maximă este 1000 per produs.");
+      return false;
+    }
+    setCart(items => {
+      const next = [...items];
+      for (const p of chosen) {
+        const selected = allocations.filter(a => a.product_id === p.id);
+        const quantity = selected.reduce((n, a) => n + a.quantity, 0);
+        const idx = next.findIndex(i => i.product.id === p.id);
+        if (idx < 0) next.push({ product: p, quantity, allocations: selected, menu_days: days });
+        else next[idx] = { ...next[idx], quantity: next[idx].quantity + quantity, allocations: [...(next[idx].allocations || []), ...selected], menu_days: Math.max(next[idx].menu_days || 0, days) };
+      }
+      return next;
+    });
+    setNotice("Meniul familiei a fost adăugat în coșul de mese.");
+    return true;
+  };
   const subtotal = cart.reduce(
     (sum, i) => sum + i.product.price_bani * i.quantity,
     0,
   );
   const count = cart.reduce((sum, i) => sum + i.quantity, 0);
+  const frozenCount = carts[mode].frozen.reduce((sum, i) => sum + i.quantity, 0);
+  const mealsCount = carts[mode].meals.reduce((sum, i) => sum + i.quantity, 0);
   const cartChanges =
     mode === "live" && !loading && !error
       ? cart.filter(({ product }) => {
@@ -179,7 +231,8 @@ export default function App() {
           return (
             !current ||
             current.price_bani !== product.price_bani ||
-            current.storage_type !== product.storage_type
+            current.storage_type !== product.storage_type ||
+            current.fulfillment_group !== product.fulfillment_group
           );
         })
       : [];
@@ -205,6 +258,8 @@ export default function App() {
           <a href="/catalog" onClick={(e) => link(e, "/catalog")}>
             Construiește cutia
           </a>
+          <a href="/familie" onClick={(e) => link(e, "/familie")}>Meniul familiei</a>
+          <a href="/congelate" onClick={(e) => link(e, "/congelate")}>Congelate</a>
         </nav>
         <div className="nav-actions">
           <button
@@ -220,20 +275,22 @@ export default function App() {
           </button>
           <a
             className="cart-link"
-            href="/cos"
-            onClick={(e) => link(e, "/cos")}
+            href={group === "frozen" ? "/cos/congelate" : "/cos"}
+            onClick={(e) => link(e, group === "frozen" ? "/cos/congelate" : "/cos")}
             aria-label={`Coș: ${count} produse`}
           >
             <Icon name="bag" />
             <span>Coș</span>
             <b>{count}</b>
           </a>
+          <a href="/cos/congelate" onClick={(e) => link(e, "/cos/congelate")}>Congelate: {frozenCount} · {money(carts[mode].frozen.reduce((n, i) => n + i.product.price_bani * i.quantity, 0))}</a>
+          <a href="/cos" onClick={(e) => link(e, "/cos")}>Mese: {mealsCount} · {money(carts[mode].meals.reduce((n, i) => n + i.product.price_bani * i.quantity, 0))}</a>
         </div>
       </header>
       {mode === "demo" && (
         <div className="demo-banner">
           Mod demonstrativ · Produsele, prețurile și comenzile sunt fictive și
-          rămân doar în această sesiune.
+          rămân doar în această sesiune. Fotografiile sunt ilustrative, nu produse CREDEM.
         </div>
       )}
       <main>
@@ -285,7 +342,7 @@ export default function App() {
               <div className="section-heading">
                 <div>
                   <h2>Tu alegi cum îți este mai ușor.</h2>
-                  <p>Două moduri simple de a avea mesele mai aproape.</p>
+                  <p>Trei opțiuni, două coșuri și livrări separate. Fiecare comandă are un minim de 600 MDL.</p>
                 </div>
               </div>
               <div className="choice-grid">
@@ -293,23 +350,26 @@ export default function App() {
                   className="choice choice-plan"
                   onClick={() => navigate("/planuri")}
                 >
-                  <span className="choice-mark">3 zile</span>
+                  <span className="choice-mark">2–3 zile</span>
                   <span>
                     <strong>Un plan, mai multe mese.</strong>
-                    <small>Descoperă planurile de mese</small>
+                    <small>De la 250 MDL / zi · coșul de mese</small>
                   </span>
                   <Icon name="arrow" />
                 </button>
                 <button
                   className="choice choice-box"
-                  onClick={() => navigate("/catalog")}
+                  onClick={() => navigate("/familie")}
                 >
                   <span className="choice-mark">Pe gustul tău</span>
                   <span>
-                    <strong>Cutia ta, alegerea ta.</strong>
-                    <small>Explorează produsele</small>
+                    <strong>Creează meniul familiei.</strong>
+                    <small>Alege preparate pentru fiecare membru · coșul de mese</small>
                   </span>
                   <Icon name="arrow" />
+                </button>
+                <button className="choice choice-box" onClick={() => navigate("/congelate")}>
+                  <span className="choice-mark">Coș separat</span><span><strong>Produse congelate și semipreparate</strong><small>Pregătire acasă · minim 600 MDL · livrare separată</small></span><Icon name="arrow" />
                 </button>
               </div>
               <div className="how">
@@ -317,24 +377,24 @@ export default function App() {
                 <p>
                   Alege produsele, selectează o zonă și un interval disponibil,
                   apoi trimite cererea. Echipa CREDEM va verifica și confirma
-                  comanda.
+                  comanda. Mesele se livrează împreună în condiții refrigerate validate, cu țintă de aproximativ 4°C; congelatele necesită transport separat. Temperaturile și termenul de păstrare se confirmă pentru fiecare produs.
                 </p>
               </div>
             </section>
           </>
         ) : null}
-        {(path === "/catalog" || path === "/planuri") && (
+        {(path === "/catalog" || path === "/planuri" || path === "/congelate") && (
           <section className="container page">
             <div className="page-heading">
               <div>
                 <p className="overline">CREDEM HOME</p>
                 <h1>
-                  {path === "/planuri"
-                    ? "Planuri de mese pentru 3 zile"
+                  {path === "/congelate" ? "Produse congelate și semipreparate" : path === "/planuri"
+                    ? "Planuri de mese pentru 2 sau 3 zile"
                     : "Construiește-ți cutia"}
                 </h1>
                 <p>
-                  {path === "/planuri"
+                  {path === "/congelate" ? "Comandă separată, cu propriul minim și interval de livrare." : path === "/planuri"
                     ? "Mai puține griji pentru mesele de zi cu zi."
                     : "Alege preparatele potrivite pentru tine."}
                 </p>
@@ -366,8 +426,8 @@ export default function App() {
             ) : (
               <Catalog
                 key={`${mode}-${path}`}
-                products={products.filter((p) =>
-                  path === "/planuri" ? p.product_type === "meal_plan" : true,
+                products={products.filter((p) => p.fulfillment_group === (path === "/congelate" ? "frozen" : "meals") && (
+                  path === "/planuri" ? p.product_type === "meal_plan" : true),
                 )}
                 navigate={navigate}
                 add={add}
@@ -382,15 +442,17 @@ export default function App() {
             mode={mode}
             navigate={navigate}
             add={add}
+            selectGroup={setGroup}
           />
         )}
-        {path === "/cos" && (
+        {path === "/familie" && (loading ? <p className="state">Se încarcă produsele…</p> : error ? <p role="alert" className="error">{error}</p> : <FamilyBuilder products={products.filter(p => p.fulfillment_group === "meals" && p.product_type === "individual_dish" && p.storage_type === "chilled" && p.preparation_level === "ready")} addMenu={addMenu} navigate={navigate} />)}
+        {(path === "/cos" || path === "/cos/congelate") && (
           <section className="container page narrow">
             <div className="page-heading">
               <div>
                 <p className="overline">COȘUL TĂU</p>
-                <h1>Gata pentru acasă.</h1>
-                <p>Revizuiește produsele înainte de a trimite cererea.</p>
+                <h1>Coș {group === "meals" ? "mese" : "congelate"}</h1>
+                <p>Fiecare coș se comandă și se livrează separat, cu minim 600 MDL.</p>
               </div>
             </div>
             {cartChanges.length > 0 && (
@@ -411,34 +473,37 @@ export default function App() {
               clear={() => setCart(() => [])}
               subtotal={subtotal}
               navigate={navigate}
+              group={group}
+              changeAllocation={changeAllocation}
             />
           </section>
         )}
-        {path === "/checkout" && (
+        {(path === "/checkout" || path === "/checkout/congelate") && (
           <Checkout
             mode={mode}
+            group={group}
             cart={cart}
             subtotal={subtotal}
             navigate={navigate}
             updateProducts={updateProducts}
-            onSuccess={(order) => {
-              const confirmation = { order, demo: mode === "demo" };
+            onSuccess={(order, delivery_at) => {
+              const confirmation = { order, demo: mode === "demo", group, delivery_at };
               sessionStorage.setItem(
-                "credem-confirmation",
+                `credem-confirmation-${mode}-${group}`,
                 JSON.stringify(confirmation),
               );
               setResult(confirmation);
               setCart(() => []);
-              navigate("/cerere-trimisa");
+              navigate(group === "frozen" ? "/cerere-trimisa/congelate" : "/cerere-trimisa");
             }}
           />
         )}
-        {path === "/cerere-trimisa" && (
+        {(path === "/cerere-trimisa" || path === "/cerere-trimisa/congelate") && (
           <section className="container page narrow">
             <div className="confirmation">
               <div className="checkmark">✓</div>
               <h1>
-                {result?.demo
+                {!result ? "Nicio cerere în această sesiune" : result.demo
                   ? "Cerere simulată trimisă"
                   : "Cererea a fost trimisă."}
               </h1>
@@ -450,6 +515,8 @@ export default function App() {
                       : "Îți mulțumim! Echipa CREDEM va verifica cererea. Comanda nu este încă confirmată și nu a fost efectuată nicio plată."}
                   </p>
                   <div className="receipt">
+                    <div><span>Comandă</span><strong>{result.group === "frozen" ? "Congelate" : "Mese"}</strong></div>
+                    {result.delivery_at && <div><span>Livrare</span><strong>{dateTime(result.delivery_at)}</strong></div>}
                     <div>
                       <span>Număr cerere</span>
                       <strong>
@@ -606,6 +673,7 @@ function CatalogCard({
         )}
       </button>
       <div className="product-info">
+        {p.image_preview_url?.includes("vegetable-soup.jpg") && <small>Foto ilustrativă: <a href="https://commons.wikimedia.org/wiki/File:Vegetable_soup_and_bread_at_the_office.jpg">JIP</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></small>}
         <div className="product-meta">
           <span>{storageLabel[p.storage_type] || p.storage_type}</span>
           <span>{p.net_weight_g ? `${p.net_weight_g} g` : p.unit}</span>
@@ -617,6 +685,8 @@ function CatalogCard({
           {p.name}
         </button>
         <p>{p.description}</p>
+        {p.plan_duration_days && <p>{p.plan_duration_days} zile · {p.price_bani % p.plan_duration_days ? "aprox. " : ""}{money(Math.round(p.price_bani / p.plan_duration_days))} / zi</p>}
+        {p.fulfillment_group === "frozen" && <p>Păstrare congelată · {p.preparation_instructions || "Verifică instrucțiunile de preparare."}</p>}
         <div className="product-bottom">
           <strong>{money(p.price_bani)}</strong>
           <label className="catalog-quantity">
@@ -653,15 +723,18 @@ function ProductDetail({
   mode,
   navigate,
   add,
+  selectGroup,
 }: {
   id: number;
   mode: Mode;
   navigate: (s: string) => void;
   add: (p: Product, quantity?: number) => void;
+  selectGroup: (group: FulfillmentGroup) => void;
 }) {
   const [quantity, setQuantity] = useState(1);
   const [p, setP] = useState<Product | null>(null);
   const [error, setError] = useState("");
+  useEffect(() => { if (p?.fulfillment_group) selectGroup(p.fulfillment_group); }, [p, selectGroup]);
   useEffect(() => {
     let active = true;
     setP(null);
@@ -684,7 +757,7 @@ function ProductDetail({
   }, [id, mode]);
   return (
     <section className="container page">
-      <button className="text-button back" onClick={() => navigate("/catalog")}>
+      <button className="text-button back" onClick={() => navigate(p?.fulfillment_group === "frozen" ? "/congelate" : "/catalog")}>
         ← Înapoi la produse
       </button>
       {error ? (
@@ -712,6 +785,7 @@ function ProductDetail({
             )}
           </div>
           <div>
+            {p.image_detail_url?.includes("vegetable-soup.jpg") && <small>Foto ilustrativă: <a href="https://commons.wikimedia.org/wiki/File:Vegetable_soup_and_bread_at_the_office.jpg">JIP</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></small>}
             <p className="overline">
               {storageLabel[p.storage_type]} ·{" "}
               {p.net_weight_g ? `${p.net_weight_g} g` : p.unit}
@@ -719,6 +793,7 @@ function ProductDetail({
             <h1>{p.name}</h1>
             <p className="lead">{p.description}</p>
             <p className="detail-price">{money(p.price_bani)}</p>
+            {p.plan_duration_days && <p>{p.plan_duration_days} zile · {p.price_bani % p.plan_duration_days ? "aprox. " : ""}{money(Math.round(p.price_bani / p.plan_duration_days))} pe zi</p>}
             {p.ingredients && (
               <p>
                 <strong>Ingrediente:</strong> {p.ingredients}
@@ -766,23 +841,52 @@ function ProductDetail({
     </section>
   );
 }
+function FamilyBuilder({ products, addMenu, navigate }: { products: Product[]; addMenu: (a: Allocation[], days: number) => boolean; navigate: (s: string) => void }) {
+  const [days, setDays] = useState(3);
+  const [members, setMembers] = useState(["Adult 1"]);
+  const [allocations, setAllocations] = useState<Allocation[]>([]);
+  const [selected, setSelected] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const totals = allocations.reduce<Record<number, number>>((result, a) => ({ ...result, [a.product_id]: (result[a.product_id] || 0) + a.quantity }), {});
+  const cost = Object.entries(totals).reduce((sum, [id, q]) => sum + (products.find(p => p.id === Number(id))?.price_bani || 0) * q, 0);
+  function add(day: number, member: string) {
+    const id = Number(selected[`${day}-${member}`] || products[0]?.id);
+    if (!id) return;
+    setAllocations(old => {
+      const existing = old.find(a => a.product_id === id && a.day_index === day && a.member_label === member);
+      return existing ? old.map(a => a === existing ? { ...a, quantity: Math.min(1000, a.quantity + 1) } : a) : [...old, { product_id: id, day_index: day, member_label: member, quantity: 1 }];
+    });
+  }
+  return <section className="container page">
+    <div className="page-heading"><div><p className="overline">MENIUL FAMILIEI · COȘ MESE</p><h1>Creează meniul familiei tale</h1><p>Alege preparate pentru fiecare persoană și zi. Toate mesele sosesc într-o singură livrare refrigerată.</p></div></div>
+    <label>Număr de zile <select value={days} onChange={e => { const n = Number(e.target.value); setDays(n); setAllocations(old => old.filter(a => a.day_index <= n)); }}><option value={1}>1 zi</option><option value={2}>2 zile</option><option value={3}>3 zile</option></select></label>
+    <div className="form-stack"><h2>Membrii familiei</h2>{members.map((member, i) => <div key={i}><label>Membru {i + 1}<input value={member} maxLength={60} onChange={e => { const next = e.target.value; setMembers(old => old.map((m, j) => j === i ? next : m)); setAllocations(old => old.map(a => a.member_label === member ? { ...a, member_label: next } : a)); }} /></label>{members.length > 1 && <button type="button" className="text-button" onClick={() => { setMembers(old => old.filter((_, j) => j !== i)); setAllocations(old => old.filter(a => a.member_label !== member)); }}>Elimină membrul și selecțiile</button>}</div>)}<button type="button" className="button-outline" onClick={() => setMembers(old => [...old, `Membru ${old.length + 1}`])}>Adaugă membru</button></div>
+    {!products.length && <p>Nu sunt preparate compatibile disponibile în acest moment.</p>}
+    {Array.from({ length: days }, (_, index) => index + 1).map(day => <section className="admin-section" key={day}><h2>Ziua {day}</h2>{members.map((member, index) => <div className="detail-panel" key={index}><h3>{member || `Membru ${index + 1}`}</h3>{allocations.filter(a => a.day_index === day && a.member_label === member).map((a, i) => <p key={`${a.product_id}-${i}`}>{products.find(p => p.id === a.product_id)?.name || `Produs #${a.product_id}`} <label>Cantitate <input type="number" min="1" max="1000" step="1" value={a.quantity} onChange={e => setAllocations(old => old.map(item => item === a ? { ...item, quantity: Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value)) || 1)) } : item))} /></label> <button className="text-button" type="button" onClick={() => setAllocations(old => old.filter(item => item !== a))}>Elimină</button></p>)}<label>Preparat<select value={selected[`${day}-${member}`] || ""} onChange={e => setSelected({ ...selected, [`${day}-${member}`]: e.target.value })}><option value="">Alege preparatul</option>{products.map(p => <option value={p.id} key={p.id}>{p.name} · {money(p.price_bani)}</option>)}</select></label><button type="button" disabled={!products.length} onClick={() => add(day, member)}>Adaugă o porție</button></div>)}</section>)}
+    <section className="cart-summary"><h2>Rezumat</h2><p>{days} zile · {members.length} membri · {allocations.reduce((n, a) => n + a.quantity, 0)} porții</p>{Object.entries(totals).map(([id, q]) => <p key={id}>{products.find(p => p.id === Number(id))?.name}: {q}</p>)}<strong>{money(cost)}</strong><p>Minimul comenzii de mese este 600 MDL; congelatele se comandă separat.</p>{error && <p role="alert" className="error">{error}</p>}<button type="button" onClick={() => { if (!allocations.length || members.some(m => !m.trim()) || new Set(members.map(m => m.trim())).size !== members.length) { setError("Adaugă preparate și etichete distincte pentru membrii familiei."); return; } if (addMenu(allocations, days)) navigate("/cos"); }}>Adaugă meniul în coș</button></section>
+  </section>;
+}
 function Cart({
   cart,
   change,
   clear,
   subtotal,
   navigate,
+  group,
+  changeAllocation,
 }: {
   cart: CartItem[];
   change: (id: number, q: number) => void;
   clear: () => void;
   subtotal: number;
   navigate: (s: string) => void;
+  group: FulfillmentGroup;
+  changeAllocation: (productId: number, index: number, quantity: number) => void;
 }) {
   return cart.length ? (
     <>
       <div className="cart-list">
-        {cart.map(({ product: p, quantity: q }) => (
+        {cart.map(({ product: p, quantity: q, allocations }) => (
           <div className="cart-row" key={p.id}>
             <div className="cart-thumb">
               {p.image_preview_url ? (
@@ -796,6 +900,7 @@ function Cart({
               <small>
                 {storageLabel[p.storage_type]} · {money(p.price_bani)}
               </small>
+              {allocations?.map((a, index) => <small key={index}>Ziua {a.day_index} · {a.member_label}: <input aria-label={`Cantitate ${p.name}, ziua ${a.day_index}, ${a.member_label}`} type="number" min="0" max="1000" value={a.quantity} onChange={e => changeAllocation(p.id, index, Number(e.target.value))} /></small>)}
               <button className="text-button" onClick={() => change(p.id, 0)}>
                 Elimină
               </button>
@@ -828,10 +933,9 @@ function Cart({
           <strong>{money(subtotal)}</strong>
         </div>
         <p>
-          Minimul și taxa de livrare depind de zona selectată. Prețul final este
-          calculat de server.
+          Minim 600 MDL per comandă. Mai ai nevoie de {money(Math.max(0, 60000 - subtotal))}; zona poate avea un minim mai mare.
         </p>
-        <button onClick={() => navigate("/checkout")}>
+        <button onClick={() => navigate(group === "frozen" ? "/checkout/congelate" : "/checkout")}>
           Continuă spre livrare <Icon name="arrow" />
         </button>
       </div>
@@ -846,6 +950,7 @@ function Cart({
 }
 function Checkout({
   mode,
+  group,
   cart,
   subtotal,
   navigate,
@@ -853,11 +958,12 @@ function Checkout({
   onSuccess,
 }: {
   mode: Mode;
+  group: FulfillmentGroup;
   cart: CartItem[];
   subtotal: number;
   navigate: (s: string) => void;
   updateProducts: (products: Product[]) => void;
-  onSuccess: (v: OrderCreated) => void;
+  onSuccess: (v: OrderCreated, delivery_at?: string) => void;
 }) {
   const [zones, setZones] = useState<Zone[]>([]);
   const [windows, setWindows] = useState<Window[]>([]);
@@ -866,6 +972,7 @@ function Checkout({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [address, setAddress] = useState("");
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -889,8 +996,8 @@ function Checkout({
     setWindows([]);
     if (!zoneId) return;
     (mode === "demo"
-      ? Promise.resolve(demoWindows(Number(zoneId)))
-      : api.windows(Number(zoneId))
+      ? Promise.resolve(demoWindows(Number(zoneId), group))
+      : api.windows(Number(zoneId), group)
     )
       .then((v) => {
         if (active) setWindows(v);
@@ -901,16 +1008,17 @@ function Checkout({
     return () => {
       active = false;
     };
-  }, [zoneId, mode]);
+  }, [zoneId, mode, group]);
   const zone = zones.find((z) => z.id === Number(zoneId));
   const compatible =
     cart.length > 0 &&
     cart.every(
       (i) =>
         i.product.storage_type === cart[0].product.storage_type &&
+        i.product.fulfillment_group === group &&
         ["fresh", "chilled", "frozen"].includes(i.product.storage_type),
     );
-  const minimum = zone?.minimum_basket_bani ?? 0;
+  const minimum = Math.max(60000, zone?.minimum_basket_bani ?? 0);
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy || !zone || !windowId || subtotal < minimum || !compatible) return;
@@ -925,6 +1033,7 @@ function Checkout({
       return;
     }
     const data: OrderInput = {
+      fulfillment_group: group,
       customer_name: String(form.get("name") || "").trim(),
       phone: String(form.get("phone") || "").trim(),
       address: String(form.get("address") || "").trim(),
@@ -938,7 +1047,10 @@ function Checkout({
       items: cart.map((i) => ({
         product_id: i.product.id,
         quantity: i.quantity,
+        custom_quantity: i.allocations?.reduce((n, a) => n + a.quantity, 0) || 0,
       })),
+      allocations: cart.flatMap(i => i.allocations || []),
+      menu_days: cart.some(i => i.allocations?.length) ? Math.max(...cart.map(i => i.menu_days || 0), ...cart.flatMap(i => (i.allocations || []).map(a => a.day_index))) : null,
     };
     if (
       lat &&
@@ -956,7 +1068,7 @@ function Checkout({
         const [freshProducts, freshZones, freshWindows] = await Promise.all([
           api.products(),
           api.zones(),
-          api.windows(zone.id),
+          api.windows(zone.id, group),
         ]);
         const currentZone = freshZones.find((item) => item.id === zone.id);
         const currentWindow = freshWindows.find(
@@ -979,6 +1091,7 @@ function Checkout({
         if (
           !currentWindow ||
           currentWindow.zone_id !== zone.id ||
+          currentWindow.fulfillment_group !== group ||
           currentWindow.active === false ||
           (currentWindow.capacity != null &&
             currentWindow.reserved_orders != null &&
@@ -997,7 +1110,7 @@ function Checkout({
         const missing = cart.filter(
           (item) =>
             !freshProducts.some(
-              (p) => p.id === item.product.id && p.available && !p.demo_only,
+              (p) => p.id === item.product.id && p.available && !p.demo_only && p.fulfillment_group === group,
             ),
         );
         if (missing.length) {
@@ -1038,7 +1151,7 @@ function Checkout({
               status: "requested",
             }
           : await api.order(data);
-      onSuccess(order);
+      onSuccess(order, windows.find(w => w.id === Number(windowId))?.delivery_at);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Cererea nu a putut fi trimisă.",
@@ -1049,7 +1162,7 @@ function Checkout({
   }
   return (
     <section className="container page">
-      <button className="text-button back" onClick={() => navigate("/cos")}>
+      <button className="text-button back" onClick={() => navigate(group === "frozen" ? "/cos/congelate" : "/cos")}>
         ← Înapoi la coș
       </button>
       <div className="page-heading">
@@ -1093,6 +1206,8 @@ function Checkout({
               Adresa de livrare
               <input
                 name="address"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
                 required
                 maxLength={300}
                 autoComplete="street-address"
@@ -1154,7 +1269,7 @@ function Checkout({
                 placeholder="De exemplu: intrarea, etajul"
               />
             </label>
-            <LocationPicker />
+            <LocationPicker address={address} onAddress={setAddress} />
           </div>
           <aside className="checkout-summary">
             <h2>Rezumatul cererii</h2>

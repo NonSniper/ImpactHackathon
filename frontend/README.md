@@ -17,4 +17,6 @@ The live catalog shows only approved, available backend products. Freshly seeded
 
 Open `/admin` and enter the backend's shared bearer token. The token is kept in page memory and must be entered again after a reload. This is temporary supervised-demo authentication, not a production login system. Orders are requests, not payments. Delivery location markers require manual review; the map does not verify zones or optimize routes.
 
+Meals and Frozen use separate carts, delivery windows and requests, each with a minimum of 600 MDL or the zone's higher minimum. The family builder stores intended day/person allocations without adding duplicate chargeable items. Set `VITE_GEOAPIFY_KEY` only for optional address suggestions; restrict the browser key by origin and usage in the provider account. Without it, manual pins and device geolocation remain available. See `PHOTO_CREDITS.md` for the illustrative photo license.
+
 For integration tests use a new isolated database, configure a temporary admin token, and create an explicitly test-only approved product with fictional customer data. Do not approve seeded illustrative products for commercial use. PostgreSQL and real object storage require separate environment-specific verification.

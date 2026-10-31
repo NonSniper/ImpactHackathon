@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -10,6 +11,25 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.main import app
 from app.models import Order, OrderItem
+
+
+def test_populated_legacy_migration_preserves_history_and_requires_classification(tmp_path):
+    backend_dir = Path(__file__).resolve().parents[1]
+    db_file = tmp_path / "legacy.db"
+    env = os.environ | {"DATABASE_URL": f"sqlite:///{db_file}"}
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "0012"], cwd=backend_dir, env=env, check=True, capture_output=True)
+    with sqlite3.connect(db_file) as db:
+        db.execute("INSERT INTO products(id,name,description,category,price_bani,storage_type,available,demo_only) VALUES(1,'Legacy','Test','test',65000,'chilled',1,0)")
+        db.execute("INSERT INTO delivery_zones(id,city,neighborhood,active) VALUES(1,'Test','Test',1)")
+        db.execute("INSERT INTO delivery_windows(id,zone_id,delivery_at,ordering_cutoff,reserved_orders) VALUES(1,1,'2099-01-03','2099-01-02',1)")
+        db.execute("INSERT INTO orders(id,customer_name,phone,address,zone_id,delivery_window_id,total_bani,subtotal_bani) VALUES(1,'Test','060000000','Test',1,1,65000,65000)")
+        db.execute("INSERT INTO order_items(order_id,product_id,quantity,unit_price_bani) VALUES(1,1,1,65000)")
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=backend_dir, env=env, check=True, capture_output=True)
+    with sqlite3.connect(db_file) as db:
+        assert db.execute("SELECT id,total_bani,fulfillment_group FROM orders").fetchone() == (1, 65000, None)
+        assert db.execute("SELECT quantity,unit_price_bani,custom_quantity FROM order_items").fetchone() == (1, 65000, 0)
+        assert db.execute("SELECT fulfillment_group FROM products").fetchone() == (None,)
+        assert db.execute("SELECT reserved_orders,fulfillment_group FROM delivery_windows").fetchone() == (1, None)
 
 
 def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
@@ -32,7 +52,11 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
         with TestClient(app) as client:
             zone = client.get("/api/delivery-zones").json()[0]
             assert zone["name"] == "Rîșcani"
-            window = client.get("/api/delivery-windows", params={"zone_id": zone["id"]}).json()[0]
+            headers = {"Authorization": "Bearer test-secret"}
+            legacy = client.get("/api/admin/delivery-windows", headers=headers).json()[0]
+            assert legacy["fulfillment_group"] is None
+            assert client.patch(f"/api/admin/delivery-windows/{legacy['id']}", headers=headers, json={"fulfillment_group": "meals"}).status_code == 200
+            window = client.get("/api/delivery-windows", params={"zone_id": zone["id"], "fulfillment_group": "meals"}).json()[0]
             assert client.get("/api/products").json() == []
             headers = {"Authorization": "Bearer test-secret"}
             demo_products = client.get("/api/admin/products", headers=headers).json()
@@ -40,13 +64,14 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
             response = client.post("/api/orders", json={
                 "customer_name": "Test", "phone": "+37360000000", "address": "Adresă de test",
                 "zone_id": zone["id"], "delivery_window_id": window["id"],
+                "fulfillment_group": "meals",
                 "items": [{"product_id": demo_products[0]["id"], "quantity": 1}],
             })
             assert response.status_code == 400
             created = client.post("/api/admin/products", headers=headers, json={
                 "name": "Automated test product", "description": "Test only; not a commercial offer.",
-                "category": "test", "price_bani": 65_000, "storage_type": "fresh",
-                "product_type": "meal_plan", "available": True, "demo_only": False,
+                "category": "test", "price_bani": 65_000, "storage_type": "chilled",
+                "product_type": "meal_plan", "plan_duration_days": 2, "fulfillment_group": "meals", "preparation_level": "ready", "available": True, "demo_only": False,
             })
             assert created.status_code == 201
             product = client.get("/api/products").json()[0]
@@ -54,6 +79,7 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
             response = client.post("/api/orders", json={
                 "customer_name": "Test", "phone": "+37360000000", "address": "Adresă de test",
                 "zone_id": zone["id"], "delivery_window_id": window["id"],
+                "fulfillment_group": "meals",
                 "latitude": 47.04, "longitude": 28.86,
                 "items": [{"product_id": product["id"], "quantity": 1}],
             })
@@ -76,7 +102,7 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
             })
             assert batch.status_code == 201
             batch_id = batch.json()["id"]
-            assert batch.json()["order_ids"] == [order_id] and batch.json()["storage_type"] == "fresh"
+            assert batch.json()["order_ids"] == [order_id] and batch.json()["storage_type"] == "chilled"
             assert client.get("/api/admin/orders", params={"unbatched": True}, headers=headers).json() == []
             assert client.get(f"/api/admin/orders/{order_id}", headers=headers).json()["delivery_batch_id"] == batch_id
             path = f"/api/admin/batches/{batch_id}"

@@ -44,6 +44,10 @@ const newProduct = () => ({
   available: false,
   demo_only: true,
   product_type: "individual_dish" as Product["product_type"],
+  fulfillment_group: null as Product["fulfillment_group"],
+  plan_duration_days: null as Product["plan_duration_days"],
+  preparation_level: null as Product["preparation_level"],
+  shelf_life_days: null as number | null,
   unit: "pack",
   net_weight_g: null as number | null,
   production_cost_bani: null as number | null,
@@ -81,6 +85,10 @@ function Products({ token }: { token: string }) {
       available: p.available,
       demo_only: p.demo_only,
       product_type: p.product_type,
+      fulfillment_group: p.fulfillment_group || null,
+      plan_duration_days: p.plan_duration_days || null,
+      preparation_level: p.preparation_level || null,
+      shelf_life_days: p.shelf_life_days,
       unit: p.unit,
       net_weight_g: p.net_weight_g,
       production_cost_bani: p.production_cost_bani ?? null,
@@ -232,6 +240,12 @@ function Products({ token }: { token: string }) {
                 }
               />
             </label>
+            <div className="form-grid">
+              <label>Grup livrare<select value={form.fulfillment_group || ""} onChange={e => setForm({ ...form, fulfillment_group: (e.target.value || null) as Product["fulfillment_group"] })}><option value="">Necesită clasificare</option><option value="meals">Mese</option><option value="frozen">Congelate</option></select></label>
+              <label>Nivel preparare<select value={form.preparation_level || ""} onChange={e => setForm({ ...form, preparation_level: (e.target.value || null) as Product["preparation_level"] })}><option value="">Nespecificat</option><option value="ready">Gata preparat</option><option value="semi_prepared">Semipreparat</option></select></label>
+              <label>Durată plan<select value={form.plan_duration_days || ""} onChange={e => setForm({ ...form, plan_duration_days: (Number(e.target.value) || null) as Product["plan_duration_days"] })}><option value="">Nu este plan</option><option value="2">2 zile</option><option value="3">3 zile</option></select></label>
+              <label>Termen de păstrare (zile)<input type="number" min="1" value={form.shelf_life_days ?? ""} onChange={e => setForm({ ...form, shelf_life_days: e.target.value ? Number(e.target.value) : null })} /></label>
+            </div>
             <div className="form-grid">
               <label>
                 Preț (bani)
@@ -751,6 +765,7 @@ function Windows({ token }: { token: string }) {
   const [cutoff, setCutoff] = useState("");
   const [capacity, setCapacity] = useState("");
   const [active, setActive] = useState(true);
+  const [group, setGroup] = useState<"" | "meals" | "frozen">("");
   const load = useCallback(async () => {
     try {
       const [w, z] = await Promise.all([
@@ -773,6 +788,7 @@ function Windows({ token }: { token: string }) {
     setCutoff(localInput(w.ordering_cutoff));
     setCapacity(w.capacity == null ? "" : String(w.capacity));
     setActive(Boolean(w.active));
+    setGroup(w.fulfillment_group || "");
     setOpen(true);
   }
   async function save(e: FormEvent) {
@@ -785,7 +801,10 @@ function Windows({ token }: { token: string }) {
         delivery_at?: string;
         ordering_cutoff?: string;
         zone_id?: number;
+        fulfillment_group?: "meals" | "frozen";
       } = { active, capacity: capacity ? Number(capacity) : null };
+      if (group && (!editing?.reserved_orders || group === editing.fulfillment_group)) data.fulfillment_group = group;
+      if (!editing && !group) throw Error("Alege grupul de livrare.");
       if (!editing || !editing.reserved_orders) {
         data.delivery_at = toUTC(delivery);
         data.ordering_cutoff = toUTC(cutoff);
@@ -815,6 +834,7 @@ function Windows({ token }: { token: string }) {
             setCutoff("");
             setCapacity("");
             setActive(true);
+            setGroup("");
             setOpen(true);
           }}
         >
@@ -840,6 +860,7 @@ function Windows({ token }: { token: string }) {
                 <td>
                   {zones.find((z) => z.id === w.zone_id)?.name || w.zone_id}{" "}
                   {w.is_demo && "· SIMULAT"}
+                  {` · ${w.fulfillment_group || "neclasificat"}`}
                 </td>
                 <td>{dateTime(w.delivery_at)}</td>
                 <td>{dateTime(w.ordering_cutoff)}</td>
@@ -861,6 +882,7 @@ function Windows({ token }: { token: string }) {
         <section className="detail-panel">
           <h2>{editing ? "Editează intervalul" : "Interval nou"}</h2>
           <form className="form-stack" onSubmit={save}>
+            <label>Grup livrare<select required value={group} disabled={Boolean(editing?.reserved_orders)} onChange={e => setGroup(e.target.value as typeof group)}><option value="">Alege grupul</option><option value="meals">Mese</option><option value="frozen">Congelate</option></select></label>
             <label>
               Zonă
               <select

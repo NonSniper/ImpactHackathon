@@ -1,4 +1,5 @@
 export type StorageType = "fresh" | "chilled" | "frozen" | "pending_validation";
+export type FulfillmentGroup = "meals" | "frozen";
 export type Product = {
   id: number;
   name: string;
@@ -21,6 +22,9 @@ export type Product = {
   image_preview_url: string | null;
   image_detail_url?: string | null;
   production_cost_bani?: number | null;
+  fulfillment_group?: FulfillmentGroup | null;
+  plan_duration_days?: 2 | 3 | null;
+  preparation_level?: "ready" | "semi_prepared" | null;
 };
 export type Zone = {
   id: number;
@@ -41,6 +45,7 @@ export type Window = {
   capacity?: number | null;
   reserved_orders?: number;
   is_demo?: boolean;
+  fulfillment_group?: FulfillmentGroup | null;
 };
 export type Order = {
   id: number;
@@ -55,8 +60,11 @@ export type Order = {
   status: string;
   created_at: string;
   is_demo: boolean;
+  fulfillment_group?: FulfillmentGroup | null;
 };
 export type OrderDetail = Order & {
+  menu_days?: number | null;
+  allocations?: { product_id: number; product_name_snapshot: string; day_index: number; member_label: string; quantity: number }[];
   phone: string;
   address: string;
   latitude: number | null;
@@ -68,6 +76,7 @@ export type OrderDetail = Order & {
     product_id: number;
     product_name: string | null;
     quantity: number;
+    custom_quantity?: number;
     unit_price_bani: number;
     line_total_bani: number;
     storage_type_snapshot: StorageType | null;
@@ -90,6 +99,7 @@ export type Batch = {
   is_demo: boolean;
   created_at: string;
   order_ids?: number[];
+  fulfillment_group?: FulfillmentGroup | null;
 };
 export type BatchSummary = {
   batch_id: number;
@@ -144,6 +154,7 @@ export type MapOrder = {
 };
 export type MapData = { markers: MapOrder[]; unlocated: MapOrder[] };
 export type OrderInput = {
+  fulfillment_group: FulfillmentGroup;
   customer_name: string;
   phone: string;
   address: string;
@@ -153,7 +164,9 @@ export type OrderInput = {
   longitude: number | null;
   coordinate_source: "manual_map_pin" | null;
   delivery_instructions: string | null;
-  items: { product_id: number; quantity: number }[];
+  items: { product_id: number; quantity: number; custom_quantity: number }[];
+  menu_days: number | null;
+  allocations: { product_id: number; day_index: number; member_label: string; quantity: number }[];
 };
 
 const base = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "") + "/api";
@@ -216,7 +229,7 @@ export const api = {
   products: () => request<Product[]>("/products"),
   product: (id: number) => request<Product>(`/products/${id}`),
   zones: () => request<Zone[]>("/delivery-zones"),
-  windows: (id: number) => request<Window[]>(`/delivery-windows?zone_id=${id}`),
+  windows: (id: number, group: FulfillmentGroup) => request<Window[]>(`/delivery-windows?zone_id=${id}&fulfillment_group=${group}`),
   order: (value: OrderInput) =>
     request<OrderCreated>("/orders", { method: "POST", body: body(value) }),
   adminGet: <T>(path: string, token: string) =>

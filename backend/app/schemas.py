@@ -27,6 +27,9 @@ class ProductRead(BaseModel):
     preparation_instructions: str | None
     supplier: str
     image_preview_url: str | None
+    fulfillment_group: Literal["meals", "frozen"] | None = None
+    plan_duration_days: Literal[2, 3] | None = None
+    preparation_level: Literal["ready", "semi_prepared"] | None = None
 
 
 class ProductDetailRead(ProductRead):
@@ -58,6 +61,9 @@ class ProductCreate(BaseModel):
     shelf_life_days: int | None = Field(default=None, strict=True, gt=0, le=2_147_483_647)
     preparation_instructions: str | None = Field(default=None, max_length=5000)
     supplier: str = Field(default="CREDEM", min_length=1, max_length=120)
+    fulfillment_group: Literal["meals", "frozen"] | None = None
+    plan_duration_days: Literal[2, 3] | None = None
+    preparation_level: Literal["ready", "semi_prepared"] | None = None
 
 
 class ProductUpdate(BaseModel):
@@ -81,6 +87,9 @@ class ProductUpdate(BaseModel):
     shelf_life_days: int | None = Field(default=None, strict=True, gt=0, le=2_147_483_647)
     preparation_instructions: str | None = Field(default=None, max_length=5000)
     supplier: str | None = Field(default=None, min_length=1, max_length=120)
+    fulfillment_group: Literal["meals", "frozen"] | None = None
+    plan_duration_days: Literal[2, 3] | None = None
+    preparation_level: Literal["ready", "semi_prepared"] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -144,6 +153,7 @@ class DeliveryWindowRead(BaseModel):
     zone_id: int
     delivery_at: datetime
     ordering_cutoff: datetime
+    fulfillment_group: Literal["meals", "frozen"] | None = None
 
     @field_validator("delivery_at", "ordering_cutoff")
     @classmethod
@@ -162,6 +172,7 @@ class DeliveryWindowCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     zone_id: int = Field(strict=True, gt=0)
+    fulfillment_group: Literal["meals", "frozen"]
     delivery_at: datetime
     ordering_cutoff: datetime
     active: bool = True
@@ -182,6 +193,7 @@ class DeliveryWindowUpdate(BaseModel):
     ordering_cutoff: datetime | None = None
     active: bool | None = None
     capacity: int | None = Field(default=None, strict=True, gt=0, le=2_147_483_647)
+    fulfillment_group: Literal["meals", "frozen"] | None = None
 
     @field_validator("delivery_at", "ordering_cutoff")
     @classmethod
@@ -214,15 +226,34 @@ class OrderStatusRead(BaseModel):
 class OrderItemCreate(BaseModel):
     product_id: int = Field(strict=True, gt=0)
     quantity: int = Field(strict=True, gt=0, le=1000)
+    custom_quantity: int = Field(default=0, strict=True, ge=0, le=1000)
+
+
+class MenuAllocationInput(BaseModel):
+    product_id: int = Field(strict=True, gt=0)
+    day_index: int = Field(strict=True, ge=1, le=3)
+    member_label: str = Field(min_length=1, max_length=60)
+    quantity: int = Field(strict=True, gt=0, le=1000)
+
+    @field_validator("member_label")
+    @classmethod
+    def clean_label(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Member label cannot be blank")
+        return value
 
 
 class OrderCreate(BaseModel):
+    fulfillment_group: Literal["meals", "frozen"]
     customer_name: str = Field(min_length=1, max_length=120)
     phone: str = Field(min_length=1, max_length=30)
     address: str = Field(min_length=1, max_length=300)
     zone_id: int = Field(strict=True, gt=0)
     delivery_window_id: int = Field(strict=True, gt=0)
     items: list[OrderItemCreate] = Field(min_length=1, max_length=100)
+    menu_days: int | None = Field(default=None, strict=True, ge=1, le=3)
+    allocations: list[MenuAllocationInput] = Field(default_factory=list, max_length=1000)
     latitude: float | None = Field(default=None, strict=True, ge=-90, le=90, allow_inf_nan=False)
     longitude: float | None = Field(default=None, strict=True, ge=-180, le=180, allow_inf_nan=False)
     coordinate_source: Literal["manual_map_pin"] | None = None
@@ -249,6 +280,17 @@ class OrderCreate(BaseModel):
             raise ValueError("Latitude and longitude must be provided together")
         if self.latitude is None and self.coordinate_source is not None:
             raise ValueError("Coordinate source requires a map pin")
+        if self.allocations and (self.fulfillment_group != "meals" or self.menu_days is None):
+            raise ValueError("Family allocations require a meals menu duration")
+        totals: dict[int, int] = {}
+        for allocation in self.allocations:
+            if allocation.day_index > (self.menu_days or 0):
+                raise ValueError("Allocation day exceeds menu duration")
+            totals[allocation.product_id] = totals.get(allocation.product_id, 0) + allocation.quantity
+        if any(item.custom_quantity > item.quantity or totals.get(item.product_id, 0) != item.custom_quantity for item in self.items):
+            raise ValueError("Allocations must match custom quantities")
+        if set(totals) - set(product_ids):
+            raise ValueError("Allocations must reference an order item")
         return self
 
 
@@ -308,6 +350,7 @@ class AdminOrderSummary(BaseModel):
     status: str
     created_at: datetime
     is_demo: bool
+    fulfillment_group: Literal["meals", "frozen"] | None = None
 
     @field_validator("delivery_at", "created_at")
     @classmethod
@@ -325,6 +368,16 @@ class AdminOrderItem(BaseModel):
     storage_type_snapshot: str | None
     net_weight_g_snapshot: int | None
     unit_snapshot: str | None
+    custom_quantity: int = 0
+
+
+class MenuAllocationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    product_id: int
+    product_name_snapshot: str
+    day_index: int
+    member_label: str
+    quantity: int
 
 
 class AdminOrderDetail(AdminOrderSummary):
@@ -337,6 +390,8 @@ class AdminOrderDetail(AdminOrderSummary):
     location_review_note: str | None
     delivery_instructions: str | None
     items: list[AdminOrderItem]
+    menu_days: int | None = None
+    allocations: list[MenuAllocationRead] = Field(default_factory=list)
 
 
 class DeliveryBatchCreate(BaseModel):
@@ -364,6 +419,7 @@ class DeliveryBatchRead(BaseModel):
     status: str
     created_at: datetime
     is_demo: bool
+    fulfillment_group: Literal["meals", "frozen"] | None = None
 
 
 class DeliveryBatchDetail(DeliveryBatchRead):
@@ -487,3 +543,4 @@ class OrderCreated(BaseModel):
     delivery_fee_bani: int
     total_bani: int
     status: str
+    fulfillment_group: Literal["meals", "frozen"] | None = None

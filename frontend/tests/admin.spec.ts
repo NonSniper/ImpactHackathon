@@ -290,6 +290,30 @@ test("overview labels its page and separates simulated orders", async ({ page })
   await expect(page.getByText("De la 1", { exact: true })).toBeVisible();
 });
 
+test("product editor sends fulfillment and plan metadata", async ({ page }) => {
+  let created: Record<string, unknown> | null = null;
+  await page.route("**/api/admin/**", route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/products") && route.request().method() === "POST") {
+      created = route.request().postDataJSON();
+      return route.fulfill({ json: { id: 1 } });
+    }
+    return route.fulfill({ json: [] });
+  });
+  await page.goto("/admin/products");
+  await login(page);
+  await page.getByRole("button", { name: "Adaugă produs" }).click();
+  await page.getByLabel("Nume", { exact: true }).fill("Plan test");
+  await page.getByLabel("Descriere").fill("Exemplu fictiv");
+  await page.getByLabel("Preț (bani)").fill("75000");
+  await page.getByLabel("Tip produs").selectOption("meal_plan");
+  await page.getByLabel("Grup livrare").selectOption("meals");
+  await page.getByLabel("Nivel preparare").selectOption("ready");
+  await page.getByLabel("Durată plan").selectOption("3");
+  await page.getByRole("button", { name: "Salvează", exact: true }).click();
+  await expect.poll(() => created).toMatchObject({ fulfillment_group: "meals", preparation_level: "ready", plan_duration_days: 3, price_bani: 75000, available: false, demo_only: true });
+});
+
 for (const viewport of [{ name: "mobile", width: 390, height: 844 }, { name: "desktop", width: 1440, height: 900 }]) {
   test(`admin direct routes and controls work on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);

@@ -41,6 +41,8 @@ def create_batch(payload: DeliveryBatchCreate, db: Annotated[Session, Depends(ge
         raise HTTPException(status_code=409, detail="One or more orders are already assigned to a batch")
     if any(order.is_demo != window.is_demo for order in orders):
         raise HTTPException(status_code=400, detail="Demo and real orders and windows cannot be mixed")
+    if window.fulfillment_group is None or any(order.fulfillment_group != window.fulfillment_group for order in orders):
+        raise HTTPException(status_code=400, detail="Orders and window must share a classified fulfillment group")
     if any(order.zone_id != payload.zone_id or order.delivery_window_id != window.id
            or order.status not in BATCHABLE_STATUSES for order in orders):
         raise HTTPException(status_code=400, detail="Orders must share the zone and window and be eligible for delivery")
@@ -53,7 +55,8 @@ def create_batch(payload: DeliveryBatchCreate, db: Annotated[Session, Depends(ge
         raise HTTPException(status_code=400, detail="Order items require one known, compatible storage type")
 
     batch = DeliveryBatch(zone_id=payload.zone_id, delivery_window_id=window.id, storage_type=storage_type,
-                          is_demo=window.is_demo, estimate_kind="demo" if window.is_demo else None)
+                          is_demo=window.is_demo, estimate_kind="demo" if window.is_demo else None,
+                          fulfillment_group=window.fulfillment_group)
     try:
         db.add(batch)
         db.flush()
@@ -61,6 +64,7 @@ def create_batch(payload: DeliveryBatchCreate, db: Annotated[Session, Depends(ge
             Order.id.in_(payload.order_ids), Order.delivery_batch_id.is_(None),
             Order.zone_id == payload.zone_id, Order.delivery_window_id == window.id,
             Order.is_demo.is_(window.is_demo),
+            Order.fulfillment_group == window.fulfillment_group,
             Order.status.in_(BATCHABLE_STATUSES),
         ).values(delivery_batch_id=batch.id))
         if result.rowcount != len(payload.order_ids):

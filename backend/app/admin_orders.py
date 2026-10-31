@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product
+from app.models import DeliveryWindow, DeliveryZone, Order, OrderItem, Product, MenuAllocation
 from app.schemas import (AdminMapOrder, AdminMapResponse, AdminOrderDetail, AdminOrderItem, AdminOrderSummary,
                          OrderLocationUpdate, OrderStatusRead, OrderStatusUpdate)
 from app.security import require_admin
@@ -22,6 +22,7 @@ def order_summary(order: Order, window: DeliveryWindow) -> AdminOrderSummary:
         delivery_batch_id=order.delivery_batch_id, subtotal_bani=order.subtotal_bani,
         delivery_fee_bani=order.delivery_fee_bani, total_bani=order.total_bani,
         status=order.status, created_at=order.created_at, is_demo=order.is_demo,
+        fulfillment_group=order.fulfillment_group,
     )
 
 
@@ -111,12 +112,14 @@ def get_order(order_id: int, db: Annotated[Session, Depends(get_db)]) -> AdminOr
         unit_price_bani=item.unit_price_bani, line_total_bani=item.quantity * item.unit_price_bani,
         storage_type_snapshot=item.storage_type_snapshot, net_weight_g_snapshot=item.net_weight_g_snapshot,
         unit_snapshot=item.unit_snapshot,
+        custom_quantity=item.custom_quantity,
     ) for item, product in rows]
     return AdminOrderDetail(
         **order_summary(order, window).model_dump(), phone=order.phone, address=order.address,
         latitude=order.latitude, longitude=order.longitude, coordinate_source=order.coordinate_source,
         location_verification_status=order.location_verification_status, location_review_note=order.location_review_note,
-        delivery_instructions=order.delivery_instructions, items=items,
+        delivery_instructions=order.delivery_instructions, items=items, menu_days=order.menu_days,
+        allocations=list(db.scalars(select(MenuAllocation).where(MenuAllocation.order_id == order_id).order_by(MenuAllocation.day_index, MenuAllocation.id))),
     )
 
 

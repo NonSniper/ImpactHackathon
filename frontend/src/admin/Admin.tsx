@@ -502,6 +502,7 @@ function Orders({
                 <th>Stare</th>
                 <th>Valoare</th>
                 <th>Lot</th>
+                <th>Livrare</th>
                 <th>Tip</th>
               </tr>
             </thead>
@@ -520,6 +521,7 @@ function Orders({
                   <td>
                     {o.delivery_batch_id ? `#${o.delivery_batch_id}` : "—"}
                   </td>
+                  <td>{o.fulfillment_group === "meals" ? "Mese" : o.fulfillment_group === "frozen" ? "Congelate" : "Neclasificat"}</td>
                   <td>
                     <Badge demo={o.is_demo} />
                   </td>
@@ -562,6 +564,7 @@ function Orders({
                 {statusLabels[detail.status] || detail.status} ·{" "}
                 {dateTime(detail.delivery_at)}
               </p>
+              <p>Grup: {detail.fulfillment_group === "meals" ? "Mese" : detail.fulfillment_group === "frozen" ? "Congelate" : "Istoric / neclasificat"}</p>
             </div>
             <button className="text-button" onClick={() => setDetail(null)}>
               Închide
@@ -591,6 +594,7 @@ function Orders({
                   <strong>{money(i.line_total_bani)}</strong>
                 </p>
               ))}
+              {Boolean(detail.allocations?.length) && <><h3>Meniul familiei · {detail.menu_days} zile</h3>{detail.allocations?.map((a, index) => <p key={index}>Ziua {a.day_index} · {a.member_label}: {a.product_name_snapshot} × {a.quantity}</p>)}</>}
               <p>Livrare: {money(detail.delivery_fee_bani)}</p>
               <p>
                 <strong>Total solicitat: {money(detail.total_bani)}</strong>
@@ -675,6 +679,7 @@ function Batches({ token }: { token: string }) {
         (first.zone_id !== o.zone_id ||
           first.delivery_window_id !== o.delivery_window_id ||
           first.is_demo !== o.is_demo ||
+          first.fulfillment_group !== o.fulfillment_group ||
           first.items[0]?.storage_type_snapshot !==
             detail.items[0]?.storage_type_snapshot)
       ) {
@@ -834,7 +839,7 @@ function Batches({ token }: { token: string }) {
                   <td>#{o.id}</td>
                   <td>{o.customer_name}</td>
                   <td>
-                    #{o.zone_id} · {dateTime(o.delivery_at)}
+                    #{o.zone_id} · {dateTime(o.delivery_at)} · {o.fulfillment_group || "neclasificat"}
                   </td>
                   <td>{money(o.total_bani)}</td>
                 </tr>
@@ -864,6 +869,7 @@ function Batches({ token }: { token: string }) {
               <span>
                 <strong>Lot #{b.id}</strong> · Zona #{b.zone_id} · Interval #
                 {b.delivery_window_id}
+                {` · ${b.fulfillment_group || "istoric"}`}
               </span>
               <span>
                 {b.storage_type} <Badge demo={b.is_demo} />

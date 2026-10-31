@@ -1,5 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("https://api.geoapify.com/**", route => route.abort("failed"));
+});
+
 const product = {
   id: 1,
   name: "Plan test",
@@ -9,6 +13,9 @@ const product = {
   storage_type: "chilled",
   available: true,
   demo_only: false,
+  fulfillment_group: "meals",
+  preparation_level: "ready",
+  plan_duration_days: 2,
   sku: null,
   product_type: "meal_plan",
   unit: "pack",
@@ -28,6 +35,7 @@ const frozen = {
   category: "congelate",
   product_type: "individual_dish",
   storage_type: "frozen",
+  fulfillment_group: "frozen",
 };
 const zone = {
   id: 1,
@@ -42,6 +50,7 @@ const zone = {
 const windowData = {
   id: 1,
   zone_id: 1,
+  fulfillment_group: "meals",
   delivery_at: "2099-01-03T12:00:00Z",
   ordering_cutoff: "2099-01-02T12:00:00Z",
 };
@@ -53,6 +62,8 @@ type State = {
   posts: number;
   failProducts?: boolean;
   failPost?: boolean;
+  lastOrder?: any;
+  successes?: number;
 };
 async function mockPublic(page: Page, state: State) {
   await page.route("**/api/**", async (route) => {
@@ -61,19 +72,25 @@ async function mockPublic(page: Page, state: State) {
       return route.abort("failed");
     if (url.pathname === "/api/products")
       return route.fulfill({ json: state.products });
+    if (url.pathname.startsWith("/api/products/")) {
+      const found = state.products.find(p => (p as { id: number }).id === Number(url.pathname.split("/").pop()));
+      return found ? route.fulfill({ json: found }) : route.fulfill({ status: 404, json: { detail: "Not found" } });
+    }
     if (url.pathname === "/api/delivery-zones")
       return route.fulfill({ json: state.zones });
     if (url.pathname === "/api/delivery-windows")
-      return route.fulfill({ json: state.windows });
+      return route.fulfill({ json: state.windows.map(w => ({ ...w, fulfillment_group: url.searchParams.get("fulfillment_group") || "meals" })) });
     if (url.pathname === "/api/orders" && route.request().method() === "POST") {
       state.posts++;
+      state.lastOrder = route.request().postDataJSON();
       if (state.failPost) return route.abort("failed");
+      if (state.postStatus === 201) state.successes = (state.successes || 0) + 1;
       return route.fulfill({
         status: state.postStatus,
         json:
           state.postStatus === 201
             ? {
-                id: 42,
+                id: 41 + (state.successes || 1),
                 subtotal_bani: 65000,
                 delivery_fee_bani: 0,
                 total_bani: 65000,
@@ -109,7 +126,7 @@ async function checkout(page: Page) {
   await page.getByLabel("Interval de livrare").selectOption("1");
 }
 
-test("category filter, quantities and mixed storage are reflected in the cart", async ({
+test("category filter and separate carts preserve quantities", async ({
   page,
 }) => {
   const data = state();
@@ -124,15 +141,130 @@ test("category filter, quantities and mixed storage are reflected in the cart", 
   await expect(
     page.getByRole("link", { name: "Coș: 2 produse" }),
   ).toBeVisible();
-  await page.getByLabel("Categorie").selectOption("congelate");
+  await page.goto("/congelate");
   await page
     .getByRole("button", { name: "Adaugă Produs congelat în coș" })
     .click();
-  await expect(page.getByRole("status")).toContainText("temperaturi diferite");
+  await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toBeVisible();
   await page.reload();
   await expect(
-    page.getByRole("link", { name: "Coș: 2 produse" }),
+    page.getByRole("link", { name: "Coș: 1 produse" }),
   ).toBeVisible();
+  await page.goto("/cos");
+  await expect(page.getByRole("link", { name: "Coș: 2 produse" })).toBeVisible();
+});
+
+test("meals and frozen carts have independent minimums and persist", async ({ page }) => {
+  const data = state();
+  data.products = [{ ...product, price_bani: 55000 }, frozen];
+  await mockPublic(page, data);
+  await page.goto("/catalog");
+  await page.getByRole("button", { name: "Adaugă Plan test în coș" }).click();
+  await page.goto("/congelate");
+  await page.getByRole("button", { name: "Adaugă Produs congelat în coș" }).click();
+  await page.goto("/cos/congelate");
+  await expect(page.locator(".cart-summary")).toContainText("650,00 MDL");
+  await page.reload();
+  await page.goto("/cos");
+  await expect(page.locator(".cart-summary")).toContainText("550,00 MDL");
+  await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
+  await page.getByLabel("Zona de livrare").selectOption("1");
+  await expect(page.getByLabel("Interval de livrare").locator("option")).toHaveCount(2);
+  await page.getByLabel("Interval de livrare").selectOption("1");
+  await expect(page.getByRole("button", { name: "Trimite cererea" })).toBeDisabled();
+  expect(data.posts).toBe(0);
+});
+
+test("each group retains its own confirmation after separate orders", async ({ page }) => {
+  const data = state();
+  await mockPublic(page, data);
+  await checkout(page);
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.locator(".receipt")).toContainText("#42");
+  await page.goto("/congelate");
+  await page.getByRole("button", { name: "Adaugă Produs congelat în coș" }).click();
+  await page.goto("/cos/congelate");
+  await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
+  await page.getByLabel("Nume și prenume").fill("Client Test");
+  await page.getByLabel("Telefon").fill("+37360000000");
+  await page.getByLabel("Adresa de livrare").fill("Adresă fictivă");
+  await page.getByLabel("Zona de livrare").selectOption("1");
+  await expect(page.getByLabel("Interval de livrare").locator("option")).toHaveCount(2);
+  await page.getByLabel("Interval de livrare").selectOption("1");
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.locator(".receipt")).toContainText("#43");
+  await page.reload();
+  await expect(page.locator(".receipt")).toContainText("#43");
+  await page.goto("/cerere-trimisa");
+  await expect(page.locator(".receipt")).toContainText("#42");
+});
+
+test("a frozen product direct link selects the correct cart after refresh", async ({ page }) => {
+  await mockPublic(page, state());
+  await page.goto("/produs/2");
+  await page.getByRole("heading", { name: "Produs congelat" }).waitFor();
+  await page.reload();
+  await page.getByRole("button", { name: "Adaugă în coș", exact: true }).click();
+  await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toHaveAttribute("href", "/cos/congelate");
+});
+
+test("family allocations reach checkout as metadata on one aggregate item", async ({ page }) => {
+  const data = state();
+  data.products = [{ ...product, product_type: "individual_dish", name: "Preparat familie", price_bani: 30000, plan_duration_days: null }];
+  await mockPublic(page, data);
+  await page.goto("/familie");
+  await page.getByLabel("Număr de zile").selectOption("2");
+  const day1 = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ziua 1", exact: true }) }).last();
+  const day2 = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ziua 2", exact: true }) }).last();
+  await day1.getByRole("button", { name: "Adaugă o porție" }).click();
+  await day2.getByRole("button", { name: "Adaugă o porție" }).click();
+  await page.getByRole("button", { name: "Adaugă meniul în coș" }).click();
+  await expect(page.locator(".cart-summary")).toContainText("600,00 MDL");
+  await page.getByLabel("Cantitate Preparat familie, ziua 1, Adult 1").fill("2");
+  await expect(page.locator(".cart-summary")).toContainText("900,00 MDL");
+  await page.getByLabel("Cantitate Preparat familie, ziua 1, Adult 1").fill("1");
+  await page.getByRole("button", { name: /Continuă spre livrare/ }).click();
+  await page.getByLabel("Nume și prenume").fill("Client Test");
+  await page.getByLabel("Telefon").fill("+37360000000");
+  await page.getByLabel("Adresa de livrare").fill("Adresă fictivă");
+  await page.getByLabel("Zona de livrare").selectOption("1");
+  await expect(page.getByLabel("Interval de livrare").locator("option")).toHaveCount(2);
+  await page.getByLabel("Interval de livrare").selectOption("1");
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.locator(".receipt")).toBeVisible();
+  expect(data.lastOrder.items).toEqual([{ product_id: 1, quantity: 2, custom_quantity: 2 }]);
+  expect(data.lastOrder.allocations).toHaveLength(2);
+  expect(data.lastOrder.menu_days).toBe(2);
+});
+
+test("denied device location leaves manual map pin available", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "geolocation", { value: { getCurrentPosition: (_success: unknown, fail: (error: object) => void) => fail({ code: 1 }) } });
+  });
+  const data = state();
+  await mockPublic(page, data);
+  await checkout(page);
+  await page.getByText("Adaugă locația pe hartă (opțional)").click();
+  await page.getByRole("button", { name: "Folosește locația mea" }).click();
+  await expect(page.getByText("Nu am putut obține locația", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Alege pe hartă" }).click();
+  await page.getByLabel("Alege locația de livrare pe hartă").click({ position: { x: 100, y: 100 } });
+  await expect(page.getByLabel("Latitudine")).not.toHaveValue("");
+  await expect(page.getByLabel("Longitudine")).not.toHaveValue("");
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.locator(".receipt")).toBeVisible();
+  expect(data.lastOrder.coordinate_source).toBe("manual_map_pin");
+});
+
+test("failed address lookup leaves address and manual coordinates usable", async ({ page }) => {
+  await mockPublic(page, state());
+  await checkout(page);
+  await page.getByText("Adaugă locația pe hartă (opțional)").click();
+  await expect(page.getByText("Căutarea adresei nu este disponibilă", { exact: false })).toBeVisible();
+  await page.getByLabel("Latitudine").fill("47.02");
+  await page.getByLabel("Longitudine").fill("28.83");
+  await page.getByRole("button", { name: "Trimite cererea" }).click();
+  await expect(page.locator(".receipt")).toBeVisible();
 });
 
 test("changed delivery fee refreshes the estimate and requires another submission", async ({ page }) => {
@@ -217,7 +349,7 @@ for (const scenario of ["storage", "inactive-zone", "expired-window", "inactive-
     await expect(page.getByRole("link", { name: "Coș: 1 produse" })).toBeVisible();
     if (scenario === "storage") {
       await page.getByRole("link", { name: /Coș:/ }).click();
-      await expect(page.getByText("Congelat", { exact: false })).toBeVisible();
+      await expect(page.locator(".cart-description").getByText("Congelat", { exact: false })).toBeVisible();
     }
   });
 }

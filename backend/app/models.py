@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, ForeignKeyConstraint, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -40,6 +40,9 @@ class Product(Base):
     image_detail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_preview_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
     image_detail_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    fulfillment_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    plan_duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    preparation_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class DeliveryZone(Base):
@@ -81,6 +84,7 @@ class DeliveryWindow(Base):
     reserved_orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     demo_dataset_key: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    fulfillment_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
 class DeliveryBatch(Base):
@@ -103,6 +107,7 @@ class DeliveryBatch(Base):
     estimate_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     estimated_transport_bani: Mapped[int | None] = mapped_column(Integer, nullable=True)
     estimated_packaging_per_order_bani: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fulfillment_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
 class Order(Base):
@@ -142,6 +147,8 @@ class Order(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     demo_dataset_key: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    fulfillment_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    menu_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class OrderItem(Base):
@@ -160,3 +167,20 @@ class OrderItem(Base):
     storage_type_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     net_weight_g_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     unit_snapshot: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    custom_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+
+class MenuAllocation(Base):
+    __tablename__ = "menu_allocations"
+    __table_args__ = (
+        ForeignKeyConstraint(["order_id", "product_id"], ["order_items.order_id", "order_items.product_id"]),
+        CheckConstraint("day_index BETWEEN 1 AND 3", name="ck_allocations_day"),
+        CheckConstraint("quantity > 0", name="ck_allocations_quantity"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_name_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
+    day_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    member_label: Mapped[str] = mapped_column(String(60), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)

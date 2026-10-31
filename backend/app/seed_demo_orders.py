@@ -76,11 +76,13 @@ def seed_demo(db: Session, reset: bool = False, now: datetime | None = None) -> 
         DeliveryWindow.is_demo.is_(True), DeliveryWindow.demo_dataset_key == DATASET_KEY,
         DeliveryWindow.zone_id == zone.id, DeliveryWindow.active.is_(True),
         DeliveryWindow.ordering_cutoff > now, DeliveryWindow.reserved_orders == 0,
+        DeliveryWindow.fulfillment_group == "meals",
     ).order_by(DeliveryWindow.id).limit(1))
     if window is None:
         delivery_at = (now + timedelta(days=3)).replace(hour=12, minute=0, second=0, microsecond=0)
         window = DeliveryWindow(zone_id=zone.id, delivery_at=delivery_at, ordering_cutoff=delivery_at - timedelta(days=1),
-                                active=True, capacity=50, reserved_orders=0, is_demo=True, demo_dataset_key=DATASET_KEY)
+                                active=True, capacity=50, reserved_orders=0, is_demo=True, demo_dataset_key=DATASET_KEY,
+                                fulfillment_group="meals")
         db.add(window)
         db.flush()
     if window.capacity is not None and window.capacity < 50:
@@ -94,7 +96,8 @@ def seed_demo(db: Session, reset: bool = False, now: datetime | None = None) -> 
                       delivery_window_id=window.id, subtotal_bani=subtotal, delivery_fee_bani=0, total_bani=subtotal,
                       status="requested", latitude=round(47.04 + (index % 10) * 0.0008, 6),
                       longitude=round(28.85 + (index // 10) * 0.001, 6), coordinate_source="simulated",
-                      location_verification_status="unverified", is_demo=True, demo_dataset_key=DATASET_KEY)
+                      location_verification_status="unverified", is_demo=True, demo_dataset_key=DATASET_KEY,
+                      fulfillment_group="meals")
         db.add(order)
         db.flush()
         db.add_all([OrderItem(order_id=order.id, product_id=product.id, quantity=quantity,
