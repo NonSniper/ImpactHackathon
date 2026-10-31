@@ -16,8 +16,10 @@ import {
 } from "../api";
 import Manage from "./Manage";
 
-type Tab = "orders" | "batches" | "products" | "zones" | "windows" | "map";
+type Tab =
+  "overview" | "orders" | "batches" | "products" | "zones" | "windows" | "map";
 const titles: Record<Tab, string> = {
+  overview: "Privire de ansamblu",
   orders: "Comenzi",
   batches: "Loturi de livrare",
   products: "Produse",
@@ -38,10 +40,21 @@ const nextStatus: Record<string, string> = {
   packed: "dispatched",
   dispatched: "delivered",
 };
-export default function Admin({ navigate }: { navigate: (s: string) => void }) {
+export default function Admin({
+  navigate,
+  path,
+}: {
+  navigate: (s: string) => void;
+  path: string;
+}) {
   const [token, setToken] = useState("");
   const [entry, setEntry] = useState("");
-  const [tab, setTab] = useState<Tab>("orders");
+  const candidate = path.replace(/^\/admin\/?/, "").replace(/\/$/, "");
+  const tab: Tab = Object.prototype.hasOwnProperty.call(titles, candidate)
+    ? (candidate as Tab)
+    : "overview";
+  const goToTab = (next: Tab) =>
+    navigate(next === "overview" ? "/admin" : `/admin/${next}`);
   const [message, setMessage] = useState("");
   useEffect(() => {
     onUnauthorized(() => {
@@ -114,7 +127,7 @@ export default function Admin({ navigate }: { navigate: (s: string) => void }) {
             <button
               key={key}
               className={tab === key ? "active" : ""}
-              onClick={() => setTab(key)}
+              onClick={() => goToTab(key)}
             >
               {titles[key]}
             </button>
@@ -141,8 +154,10 @@ export default function Admin({ navigate }: { navigate: (s: string) => void }) {
           </button>
         </header>
         <div className="admin-content">
-          {tab === "orders" ? (
-            <Orders token={token} openBatches={() => setTab("batches")} />
+          {tab === "overview" ? (
+            <Overview token={token} openOrders={() => goToTab("orders")} />
+          ) : tab === "orders" ? (
+            <Orders token={token} openBatches={() => goToTab("batches")} />
           ) : tab === "batches" ? (
             <Batches token={token} />
           ) : (
@@ -151,6 +166,130 @@ export default function Admin({ navigate }: { navigate: (s: string) => void }) {
         </div>
       </div>
     </div>
+  );
+}
+function Overview({
+  token,
+  openOrders,
+}: {
+  token: string;
+  openOrders: () => void;
+}) {
+  const [demo, setDemo] = useState("false");
+  const [offset, setOffset] = useState(0);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setOrders([]);
+    setError("");
+    api
+      .adminGet<Order[]>(
+        `/orders?limit=25&offset=${offset}&is_demo=${demo}`,
+        token,
+      )
+      .then((data) => {
+        if (current) setOrders(data);
+      })
+      .catch((err) => {
+        if (current) setError(err.message);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [token, demo, offset]);
+  const zones = orders.reduce<Record<number, number>>((counts, order) => {
+    counts[order.zone_id] = (counts[order.zone_id] || 0) + 1;
+    return counts;
+  }, {});
+  return (
+    <>
+      <div className="admin-intro">
+        <div>
+          <h2>Activitate recentă</h2>
+          <p>Valorile acoperă doar pagina afișată, nu toate comenzile.</p>
+        </div>
+        <button onClick={openOrders}>Vezi comenzile</button>
+      </div>
+      <div className="filters">
+        <label>
+          Tip date
+          <select
+            value={demo}
+            onChange={(event) => {
+              setDemo(event.target.value);
+              setOffset(0);
+            }}
+          >
+            <option value="false">Reale</option>
+            <option value="true">Simulate</option>
+          </select>
+        </label>
+      </div>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {loading ? (
+        <p className="state">Se încarcă comenzile…</p>
+      ) : (
+        <>
+          <div className="metrics">
+            <div>
+              <span>Comenzi pe pagină</span>
+              <strong>{orders.length}</strong>
+            </div>
+            <div>
+              <span>Valoare solicitată pe pagină</span>
+              <strong>
+                {money(
+                  orders.reduce((sum, order) => sum + order.total_bani, 0),
+                )}
+              </strong>
+            </div>
+            <div>
+              <span>Date afișate</span>
+              <strong>{demo === "true" ? "Simulate" : "Reale"}</strong>
+            </div>
+          </div>
+          <section className="admin-section">
+            <h2>Comenzi pe zonă</h2>
+            {Object.entries(zones).length ? (
+              Object.entries(zones).map(([id, count]) => (
+                <p key={id}>
+                  Zona #{id}: {count}
+                </p>
+              ))
+            ) : (
+              <p>Nu există comenzi pe această pagină.</p>
+            )}
+          </section>
+        </>
+      )}
+      <div className="pagination">
+        <button
+          className="button-outline"
+          disabled={loading || offset === 0}
+          onClick={() => setOffset(Math.max(0, offset - 25))}
+        >
+          Înapoi
+        </button>
+        <span>De la {offset + 1}</span>
+        <button
+          className="button-outline"
+          disabled={loading || orders.length < 25}
+          onClick={() => setOffset(offset + 25)}
+        >
+          Înainte
+        </button>
+      </div>
+    </>
   );
 }
 function Badge({ demo }: { demo: boolean }) {
@@ -822,6 +961,35 @@ function Batches({ token }: { token: string }) {
             <div>
               <h3>Estimare financiară</h3>
               <p>Cost produse: {money(finance.estimated_food_cost_bani)}</p>
+              {finance.estimated_food_cost_bani === null && (
+                <p>
+                  Cost cunoscut parțial: {money(finance.known_food_cost_bani)}
+                </p>
+              )}
+              {finance.unpriced_products.length > 0 && (
+                <>
+                  <p>Produse care necesită verificare:</p>
+                  <ul>
+                    {finance.unpriced_products.map((item) => (
+                      <li key={`${item.product_id}-${item.reason}`}>
+                        {production?.products.find(
+                          (p) => p.product_id === item.product_id,
+                        )?.name || `Produs #${item.product_id}`}
+                        :{" "}
+                        {(
+                          {
+                            missing_cost: "cost lipsă",
+                            unknown_order_unit:
+                              "unitatea comenzii este necunoscută",
+                            unit_or_weight_changed:
+                              "unitatea sau greutatea s-a schimbat",
+                          } as Record<string, string>
+                        )[item.reason] || item.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
               <p>
                 Cost ambalare: {money(finance.estimated_packaging_cost_bani)}
               </p>

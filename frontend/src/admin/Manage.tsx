@@ -14,6 +14,7 @@ import {
   storageLabel,
   type MapData,
   type MapOrder,
+  type OrderDetail,
   type Product,
   type StorageType,
   type Window,
@@ -946,7 +947,12 @@ function MapPage({ token }: { token: string }) {
   const [batchId, setBatchId] = useState("");
   const [status, setStatus] = useState("");
   const [selected, setSelected] = useState<MapOrder | null>(null);
+  const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [note, setNote] = useState("");
+  const [latitude, setLatitude] = useState("");
+  const [longitude, setLongitude] = useState("");
+  const [saving, setSaving] = useState(false);
+  const selectedId = useRef<number | null>(null);
   const mapNode = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markers = useRef<L.LayerGroup | null>(null);
@@ -966,6 +972,27 @@ function MapPage({ token }: { token: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+  const selectOrder = useCallback(
+    async (order: MapOrder) => {
+      selectedId.current = order.id;
+      setSelected(order);
+      setOrderDetail(null);
+      setNote(order.location_review_note || "");
+      setLatitude(order.latitude == null ? "" : String(order.latitude));
+      setLongitude(order.longitude == null ? "" : String(order.longitude));
+      setError("");
+      try {
+        const detail = await api.adminGet<OrderDetail>(
+          `/orders/${order.id}`,
+          token,
+        );
+        if (selectedId.current === order.id) setOrderDetail(detail);
+      } catch (e) {
+        if (selectedId.current === order.id) setError((e as Error).message);
+      }
+    },
+    [token],
+  );
   useEffect(() => {
     if (!mapNode.current) return;
     const map = L.map(mapNode.current).setView([47.025, 28.835], 11);
@@ -995,11 +1022,42 @@ function MapPage({ token }: { token: string }) {
       }).addTo(layer);
       marker.bindTooltip(`Comanda #${o.id}`);
       marker.on("click", () => {
-        setSelected(o);
-        setNote(o.location_review_note || "");
+        void selectOrder(o);
       });
     });
-  }, [data]);
+  }, [data, selectOrder]);
+  async function saveCoordinates(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected || saving) return;
+    const lat = Number(latitude),
+      lon = Number(longitude);
+    if (
+      !latitude.trim() ||
+      !longitude.trim() ||
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lon) ||
+      Math.abs(lat) > 90 ||
+      Math.abs(lon) > 180
+    ) {
+      setError("Introdu ambele coordonate în limitele geografice valide.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const updated = await api.adminPatch<MapOrder>(
+        `/orders/${selected.id}/location`,
+        { latitude: lat, longitude: lon, location_review_note: note || null },
+        token,
+      );
+      setSelected(updated);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
   async function review(status: string) {
     if (!selected) return;
     try {
@@ -1092,7 +1150,13 @@ function MapPage({ token }: { token: string }) {
         <section className="detail-panel">
           <div className="section-heading">
             <h2>Comanda #{selected.id}</h2>
-            <button className="text-button" onClick={() => setSelected(null)}>
+            <button
+              className="text-button"
+              onClick={() => {
+                selectedId.current = null;
+                setSelected(null);
+              }}
+            >
               Închide
             </button>
           </div>
@@ -1100,16 +1164,63 @@ function MapPage({ token }: { token: string }) {
             {selected.address} · {selected.location_verification_status} ·{" "}
             {money(selected.total_bani)}
           </p>
+          {orderDetail?.id === selected.id && (
+            <p>
+              {orderDetail.customer_name} · {orderDetail.phone} ·{" "}
+              {orderDetail.items
+                .map(
+                  (item) =>
+                    `${item.quantity} × ${item.product_name || `#${item.product_id}`}`,
+                )
+                .join(", ")}
+            </p>
+          )}
           <label>
             Notă de verificare
             <textarea value={note} onChange={(e) => setNote(e.target.value)} />
           </label>
+          <form className="form-stack" onSubmit={saveCoordinates}>
+            <div className="form-grid">
+              <label>
+                Latitudine
+                <input
+                  type="number"
+                  step="any"
+                  min="-90"
+                  max="90"
+                  required
+                  value={latitude}
+                  onChange={(event) => setLatitude(event.target.value)}
+                />
+              </label>
+              <label>
+                Longitudine
+                <input
+                  type="number"
+                  step="any"
+                  min="-180"
+                  max="180"
+                  required
+                  value={longitude}
+                  onChange={(event) => setLongitude(event.target.value)}
+                />
+              </label>
+            </div>
+            <p className="hint">
+              Salvarea coordonatelor marchează locația ca neverificată.
+            </p>
+            <button disabled={saving}>Salvează coordonatele</button>
+          </form>
           <div className="actions">
-            <button onClick={() => void review("verified")}>
+            <button
+              disabled={selected.latitude == null}
+              onClick={() => void review("verified")}
+            >
               Marchează verificat manual
             </button>
             <button
               className="button-outline"
+              disabled={selected.latitude == null}
               onClick={() => void review("flagged")}
             >
               Necesită verificare
@@ -1122,7 +1233,13 @@ function MapPage({ token }: { token: string }) {
         {data.unlocated.length ? (
           data.unlocated.map((o) => (
             <p key={o.id}>
-              #{o.id} · {o.address} · {money(o.total_bani)}
+              <button
+                className="table-link"
+                onClick={() => void selectOrder(o)}
+              >
+                Comanda #{o.id}
+              </button>{" "}
+              · {o.address} · {money(o.total_bani)}
             </p>
           ))
         ) : (

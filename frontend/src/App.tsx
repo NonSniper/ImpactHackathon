@@ -16,6 +16,7 @@ import LocationPicker from "./components/LocationPicker";
 
 type CartItem = { product: Product; quantity: number };
 type Mode = "live" | "demo";
+type Confirmation = { order: OrderCreated; demo: boolean };
 const readCart = (mode: Mode): CartItem[] => {
   try {
     const data = JSON.parse(
@@ -66,7 +67,9 @@ export default function App() {
     window.addEventListener("popstate", fn);
     return () => window.removeEventListener("popstate", fn);
   }, []);
-  const [mode, setMode] = useState<Mode>("live");
+  const [mode, setMode] = useState<Mode>(() =>
+    sessionStorage.getItem("credem-mode") === "demo" ? "demo" : "live",
+  );
   const [carts, setCarts] = useState<Record<Mode, CartItem[]>>(() => ({
     live: readCart("live"),
     demo: readCart("demo"),
@@ -82,10 +85,15 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [result, setResult] = useState<{
-    order: OrderCreated;
-    demo: boolean;
-  } | null>(null);
+  const [result, setResult] = useState<Confirmation | null>(() => {
+    try {
+      return JSON.parse(
+        sessionStorage.getItem("credem-confirmation") || "null",
+      );
+    } catch {
+      return null;
+    }
+  });
   useEffect(() => {
     let active = true;
     setError("");
@@ -120,7 +128,7 @@ export default function App() {
       active = false;
     };
   }, [mode]);
-  const add = (product: Product) => {
+  const add = (product: Product, quantity = 1) => {
     setNotice("");
     if (product.storage_type === "pending_validation") {
       setNotice(
@@ -139,10 +147,10 @@ export default function App() {
       return existing
         ? items.map((i) =>
             i.product.id === product.id
-              ? { ...i, quantity: Math.min(i.quantity + 1, 1000) }
+              ? { ...i, quantity: Math.min(i.quantity + quantity, 1000) }
               : i,
           )
-        : [...items, { product, quantity: 1 }];
+        : [...items, { product, quantity }];
     });
     setNotice(`${product.name} a fost adăugat în coș.`);
   };
@@ -161,7 +169,8 @@ export default function App() {
     0,
   );
   const count = cart.reduce((sum, i) => sum + i.quantity, 0);
-  if (path.startsWith("/admin")) return <Admin navigate={navigate} />;
+  if (path === "/admin" || path.startsWith("/admin/"))
+    return <Admin path={path} navigate={navigate} />;
   const link = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
     event.preventDefault();
     navigate(url);
@@ -187,7 +196,9 @@ export default function App() {
           <button
             className="mode-switch"
             onClick={() => {
-              setMode(mode === "live" ? "demo" : "live");
+              const nextMode = mode === "live" ? "demo" : "live";
+              sessionStorage.setItem("credem-mode", nextMode);
+              setMode(nextMode);
               setNotice("");
             }}
           >
@@ -340,6 +351,7 @@ export default function App() {
               </div>
             ) : (
               <Catalog
+                key={`${mode}-${path}`}
                 products={products.filter((p) =>
                   path === "/planuri" ? p.product_type === "meal_plan" : true,
                 )}
@@ -382,8 +394,23 @@ export default function App() {
             cart={cart}
             subtotal={subtotal}
             navigate={navigate}
+            updateProducts={(fresh) => {
+              setProducts(fresh);
+              setCart((items) =>
+                items.map((item) => ({
+                  ...item,
+                  product:
+                    fresh.find((p) => p.id === item.product.id) || item.product,
+                })),
+              );
+            }}
             onSuccess={(order) => {
-              setResult({ order, demo: mode === "demo" });
+              const confirmation = { order, demo: mode === "demo" };
+              sessionStorage.setItem(
+                "credem-confirmation",
+                JSON.stringify(confirmation),
+              );
+              setResult(confirmation);
               setCart(() => []);
               navigate("/cerere-trimisa");
             }}
@@ -478,65 +505,130 @@ function Catalog({
 }: {
   products: Product[];
   navigate: (s: string) => void;
-  add: (p: Product) => void;
+  add: (p: Product, quantity?: number) => void;
   mode: Mode;
 }) {
-  return products.length ? (
-    <div className="product-grid">
-      {products.map((p) => (
-        <article className="product-card" key={p.id}>
-          <button
-            className="product-image"
-            onClick={() => navigate(`/produs/${p.id}`)}
-            aria-label={`Vezi ${p.name}`}
+  const [category, setCategory] = useState("");
+  const categories = Array.from(
+    new Set(products.map((p) => p.category).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b, "ro"));
+  const visible = products.filter((p) => !category || p.category === category);
+  return (
+    <>
+      {categories.length > 0 && (
+        <label className="catalog-filter">
+          Categorie
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
           >
-            {p.image_preview_url ? (
-              <img src={p.image_preview_url} alt="" />
-            ) : (
-              <span className="image-placeholder">
-                <span>CREDEM</span>
-                <small>
-                  {mode === "demo" ? "PRODUS ILUSTRATIV" : "FĂRĂ FOTOGRAFIE"}
-                </small>
-              </span>
-            )}
+            <option value="">Toate categoriile</option>
+            {categories.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {visible.length ? (
+        <div className="product-grid">
+          {visible.map((p) => (
+            <CatalogCard
+              key={p.id}
+              product={p}
+              navigate={navigate}
+              add={add}
+              mode={mode}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="state empty">
+          <h2>Nu sunt produse disponibile momentan.</h2>
+          <p>
+            {products.length
+              ? "Nu există produse în această categorie."
+              : mode === "live"
+                ? "Produsele vor apărea aici după aprobarea lor. Poți explora experiența în modul demonstrativ."
+                : "Nu există produse în această categorie."}
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+function CatalogCard({
+  product: p,
+  navigate,
+  add,
+  mode,
+}: {
+  product: Product;
+  navigate: (s: string) => void;
+  add: (p: Product, quantity?: number) => void;
+  mode: Mode;
+}) {
+  const [quantity, setQuantity] = useState(1);
+  return (
+    <article className="product-card">
+      <button
+        className="product-image"
+        onClick={() => navigate(`/produs/${p.id}`)}
+        aria-label={`Vezi ${p.name}`}
+      >
+        {p.image_preview_url ? (
+          <img src={p.image_preview_url} alt="" />
+        ) : (
+          <span className="image-placeholder">
+            <span>CREDEM</span>
+            <small>
+              {mode === "demo" ? "PRODUS ILUSTRATIV" : "FĂRĂ FOTOGRAFIE"}
+            </small>
+          </span>
+        )}
+      </button>
+      <div className="product-info">
+        <div className="product-meta">
+          <span>{storageLabel[p.storage_type] || p.storage_type}</span>
+          <span>{p.net_weight_g ? `${p.net_weight_g} g` : p.unit}</span>
+        </div>
+        <button
+          className="product-title"
+          onClick={() => navigate(`/produs/${p.id}`)}
+        >
+          {p.name}
+        </button>
+        <p>{p.description}</p>
+        <div className="product-bottom">
+          <strong>{money(p.price_bani)}</strong>
+          <label className="catalog-quantity">
+            Cantitate
+            <input
+              aria-label={`Cantitate pentru ${p.name}`}
+              type="number"
+              min="1"
+              max="1000"
+              step="1"
+              value={quantity}
+              onChange={(e) =>
+                setQuantity(
+                  Math.max(1, Math.min(1000, Number(e.target.value) || 1)),
+                )
+              }
+            />
+          </label>
+          <button
+            className="add-button"
+            onClick={() => add(p, quantity)}
+            disabled={p.storage_type === "pending_validation"}
+            aria-label={`Adaugă ${p.name} în coș`}
+          >
+            <Icon name="plus" />
           </button>
-          <div className="product-info">
-            <div className="product-meta">
-              <span>{storageLabel[p.storage_type] || p.storage_type}</span>
-              <span>{p.net_weight_g ? `${p.net_weight_g} g` : p.unit}</span>
-            </div>
-            <button
-              className="product-title"
-              onClick={() => navigate(`/produs/${p.id}`)}
-            >
-              {p.name}
-            </button>
-            <p>{p.description}</p>
-            <div className="product-bottom">
-              <strong>{money(p.price_bani)}</strong>
-              <button
-                className="add-button"
-                onClick={() => add(p)}
-                disabled={p.storage_type === "pending_validation"}
-                aria-label={`Adaugă ${p.name} în coș`}
-              >
-                <Icon name="plus" />
-              </button>
-            </div>
-          </div>
-        </article>
-      ))}
-    </div>
-  ) : (
-    <div className="state empty">
-      <h2>Nu sunt produse disponibile momentan.</h2>
-      <p>
-        {mode === "live"
-          ? "Produsele vor apărea aici după aprobarea lor. Poți explora experiența în modul demonstrativ."
-          : "Nu există produse în această categorie."}
-      </p>
-    </div>
+        </div>
+      </div>
+    </article>
   );
 }
 function ProductDetail({
@@ -548,8 +640,9 @@ function ProductDetail({
   id: number;
   mode: Mode;
   navigate: (s: string) => void;
-  add: (p: Product) => void;
+  add: (p: Product, quantity?: number) => void;
 }) {
+  const [quantity, setQuantity] = useState(1);
   const [p, setP] = useState<Product | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -629,8 +722,23 @@ function ProductDetail({
                 <strong>Termen de păstrare:</strong> {p.shelf_life_days} zile
               </p>
             )}
+            <label className="detail-quantity">
+              Cantitate
+              <input
+                type="number"
+                min="1"
+                max="1000"
+                step="1"
+                value={quantity}
+                onChange={(e) =>
+                  setQuantity(
+                    Math.max(1, Math.min(1000, Number(e.target.value) || 1)),
+                  )
+                }
+              />
+            </label>
             <button
-              onClick={() => add(p)}
+              onClick={() => add(p, quantity)}
               disabled={p.storage_type === "pending_validation"}
             >
               Adaugă în coș <Icon name="plus" />
@@ -724,12 +832,14 @@ function Checkout({
   cart,
   subtotal,
   navigate,
+  updateProducts,
   onSuccess,
 }: {
   mode: Mode;
   cart: CartItem[];
   subtotal: number;
   navigate: (s: string) => void;
+  updateProducts: (products: Product[]) => void;
   onSuccess: (v: OrderCreated) => void;
 }) {
   const [zones, setZones] = useState<Zone[]>([]);
@@ -825,6 +935,72 @@ function Checkout({
     }
     setBusy(true);
     try {
+      if (mode === "live") {
+        const [freshProducts, freshZones, freshWindows] = await Promise.all([
+          api.products(),
+          api.zones(),
+          api.windows(zone.id),
+        ]);
+        const currentZone = freshZones.find((item) => item.id === zone.id);
+        const currentWindow = freshWindows.find(
+          (item) => item.id === Number(windowId),
+        );
+        setZones(freshZones);
+        setWindows(freshWindows);
+        if (!currentZone) {
+          setZoneId("");
+          setError(
+            "Zona selectată nu mai este disponibilă. Alege o altă zonă.",
+          );
+          return;
+        }
+        if (
+          !currentWindow ||
+          Date.parse(currentWindow.ordering_cutoff) <= Date.now() ||
+          Date.parse(currentWindow.delivery_at) <= Date.now()
+        ) {
+          setWindowId("");
+          setError(
+            "Intervalul selectat nu mai este disponibil. Alege alt interval.",
+          );
+          return;
+        }
+        const missing = cart.filter(
+          (item) =>
+            !freshProducts.some(
+              (p) => p.id === item.product.id && p.available && !p.demo_only,
+            ),
+        );
+        if (missing.length) {
+          setError(
+            `Aceste produse nu mai sunt disponibile: ${missing.map((item) => item.product.name).join(", ")}. Elimină-le din coș.`,
+          );
+          return;
+        }
+        const changed = cart.some(({ product }) => {
+          const current = freshProducts.find((item) => item.id === product.id)!;
+          return (
+            current.price_bani !== product.price_bani ||
+            current.storage_type !== product.storage_type
+          );
+        });
+        if (changed) {
+          updateProducts(freshProducts);
+          setError(
+            "Prețul sau condițiile de păstrare s-au schimbat. Verifică din nou coșul înainte de a trimite cererea.",
+          );
+          return;
+        }
+        if (
+          currentZone.minimum_basket_bani !== zone.minimum_basket_bani ||
+          currentZone.delivery_fee_bani !== zone.delivery_fee_bani
+        ) {
+          setError(
+            "Condițiile de livrare s-au schimbat. Verifică noul minim și taxa înainte de a continua.",
+          );
+          return;
+        }
+      }
       const order =
         mode === "demo"
           ? {
