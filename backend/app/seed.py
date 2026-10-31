@@ -13,37 +13,37 @@ PRODUCTS = [
         "name": "Plan de mese pentru 3 zile — clasic",
         "description": "Plan demonstrativ de mese pentru trei zile. Preț ilustrativ.",
         "category": "meal_plan", "price_bani": 65_000, "storage_type": "fresh",
-        "available": True, "demo_only": False,
+        "available": False, "demo_only": True,
     },
     {
         "name": "Plan de mese pentru 3 zile — vegetarian",
         "description": "Plan demonstrativ vegetarian pentru trei zile. Preț ilustrativ.",
         "category": "meal_plan", "price_bani": 69_000, "storage_type": "fresh",
-        "available": True, "demo_only": False,
+        "available": False, "demo_only": True,
     },
     {
         "name": "Supă de legume",
         "description": "Supă proaspătă de legume. Preț ilustrativ.",
         "category": "soup", "price_bani": 8_500, "storage_type": "fresh",
-        "available": True, "demo_only": False,
+        "available": False, "demo_only": True,
     },
     {
         "name": "Supă de pui",
         "description": "Supă proaspătă de pui. Preț ilustrativ.",
         "category": "soup", "price_bani": 9_500, "storage_type": "fresh",
-        "available": True, "demo_only": False,
+        "available": False, "demo_only": True,
     },
     {
         "name": "Orez cu legume",
         "description": "Orez proaspăt cu legume. Preț ilustrativ.",
         "category": "main", "price_bani": 12_000, "storage_type": "fresh",
-        "available": True, "demo_only": False,
+        "available": False, "demo_only": True,
     },
     {
         "name": "Pui cu garnitură",
         "description": "Preparat proaspăt de pui cu garnitură. Preț ilustrativ.",
         "category": "main", "price_bani": 15_000, "storage_type": "fresh",
-        "available": True, "demo_only": False,
+        "available": False, "demo_only": True,
     },
     {
         "name": "Chifteluțe congelate — demonstrație",
@@ -124,7 +124,7 @@ def seed(db: Session, now: datetime | None = None) -> None:
 def main() -> None:
     with SessionLocal() as db:
         seed(db)
-    print("Demo data is ready. Prices are illustrative; demo-only products cannot be ordered.")
+    print("Demo data is ready. New seed products cannot be ordered; existing products are unchanged.")
 
 
 if __name__ == "__main__":

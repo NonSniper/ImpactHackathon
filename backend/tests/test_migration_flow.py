@@ -33,7 +33,24 @@ def test_clean_migration_seed_and_order_flow(tmp_path, monkeypatch):
             zone = client.get("/api/delivery-zones").json()[0]
             assert zone["name"] == "Rîșcani"
             window = client.get("/api/delivery-windows", params={"zone_id": zone["id"]}).json()[0]
-            product = next(p for p in client.get("/api/products").json() if p["product_type"] == "meal_plan")
+            assert client.get("/api/products").json() == []
+            headers = {"Authorization": "Bearer test-secret"}
+            demo_products = client.get("/api/admin/products", headers=headers).json()
+            assert len(demo_products) == 11 and all(p["demo_only"] and not p["available"] for p in demo_products)
+            response = client.post("/api/orders", json={
+                "customer_name": "Test", "phone": "+37360000000", "address": "Adresă de test",
+                "zone_id": zone["id"], "delivery_window_id": window["id"],
+                "items": [{"product_id": demo_products[0]["id"], "quantity": 1}],
+            })
+            assert response.status_code == 400
+            created = client.post("/api/admin/products", headers=headers, json={
+                "name": "Automated test product", "description": "Test only; not a commercial offer.",
+                "category": "test", "price_bani": 65_000, "storage_type": "fresh",
+                "product_type": "meal_plan", "available": True, "demo_only": False,
+            })
+            assert created.status_code == 201
+            product = client.get("/api/products").json()[0]
+            assert product["id"] == created.json()["id"]
             response = client.post("/api/orders", json={
                 "customer_name": "Test", "phone": "+37360000000", "address": "Adresă de test",
                 "zone_id": zone["id"], "delivery_window_id": window["id"],

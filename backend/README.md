@@ -21,7 +21,15 @@ The default database is `sqlite:///./app.db`, relative to the current directory.
 
 Admin routes require `Authorization: Bearer <ADMIN_API_TOKEN>`. Configure a long random secret as an environment variable, keep it out of source control, and use HTTPS when deployed. Without a configured token, admin routes return `503`; missing or incorrect credentials return `401`. This shared token is temporary MVP authentication and does not provide individual accounts or roles.
 
-The seed script is optional and can be run again: it leaves existing products and zone settings unchanged and creates a future delivery window for each active seeded sector if none is currently open for ordering. New installations get Chișinău's five sectors, with Rîșcani active and Buiucani, Botanica, Centru and Ciocana inactive. Migration 0005 also deactivates the previously seeded Buiucani and Botanica sectors; existing orders are retained. Seed prices are illustrative. Frozen demonstration products are explicitly marked and are not available for commercial fulfillment. The three 500 g sample products (sarmale, zraze and potatoes) are demo-only and unavailable for orders; their packaged prices, storage, ingredients, allergens, preparation and shelf life require CREDEM validation.
+The seed script is optional and can be run again: it leaves existing products and zone settings unchanged and creates a future delivery window for each active seeded sector if none is currently open for ordering. New installations get Chișinău's five sectors, with Rîșcani active and Buiucani, Botanica, Centru and Ciocana inactive. Migration 0005 also deactivates the previously seeded Buiucani and Botanica sectors; existing orders are retained. All newly seeded products have illustrative prices, are `demo_only: true` and `available: false`, and cannot be commercially ordered. The public catalog is empty until an administrator adds or approves real products after CREDEM validates their details. The admin product listing and simulated-order dataset remain available for demonstration.
+
+**Existing databases:** older seed versions created six illustrative products as orderable. Running the updated seed does not modify them or prove whether they were later approved. Before accepting real orders, review the admin product list and run this read-only check from `backend/`:
+
+```bash
+python -m app.audit_seed_products
+```
+
+It prints IDs, names, prices and availability flags for exact matches to the six old seed names; renamed products are not detected, and a name match is not proof of origin or approval. Review such products and any renamed or other unapproved items manually. For each unapproved product, an authenticated admin can send `PATCH /api/admin/products/{id}` with `{"available": false, "demo_only": true}`. Do not reactivate products until CREDEM has validated them. Existing products and order history are not changed automatically.
 
 Interactive API documentation: `http://127.0.0.1:8000/docs`.
 
@@ -43,8 +51,8 @@ Lists products that are both available and approved (not `demo_only`). Unavailab
 [
   {
     "id": 1,
-    "name": "Plan de mese pentru 3 zile — clasic",
-    "description": "Plan demonstrativ de mese pentru trei zile. Preț ilustrativ.",
+    "name": "Produs aprobat — exemplu de răspuns",
+    "description": "Exemplu de structură pentru un produs aprobat de administrator.",
     "category": "meal_plan",
     "price_bani": 65000,
     "storage_type": "fresh",
@@ -63,6 +71,8 @@ Lists products that are both available and approved (not `demo_only`). Unavailab
   }
 ]
 ```
+
+The JSON above only illustrates the response shape; it is not an approval of any real product or price. A freshly seeded catalog returns `[]`.
 
 ### `GET /api/delivery-zones`
 

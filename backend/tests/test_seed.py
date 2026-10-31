@@ -19,6 +19,7 @@ def test_seed_is_repeatable_and_replenishes_expired_windows(tmp_path):
         zones = db.scalars(select(DeliveryZone)).all()
         windows = db.scalars(select(DeliveryWindow)).all()
         assert len(products) == 11
+        assert all(product.demo_only and not product.available for product in products)
         assert len([product for product in products if product.category == "meal_plan"]) == 2
         frozen = [product for product in products if product.storage_type == "frozen"]
         assert len(frozen) == 2
@@ -38,4 +39,23 @@ def test_seed_is_repeatable_and_replenishes_expired_windows(tmp_path):
         windows = db.scalars(select(DeliveryWindow)).all()
         assert len(windows) == 2
         assert len(db.scalars(select(Product)).all()) == 11
+    engine.dispose()
+
+
+def test_seed_preserves_existing_product_approval_and_audit_is_read_only(tmp_path):
+    from app.audit_seed_products import candidates
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'review.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine, autoflush=False) as db:
+        seed(db)
+        candidate = candidates(db)[0]
+        candidate.available = True
+        candidate.demo_only = False
+        candidate.price_bani = 77_000
+        db.commit()
+        seed(db)
+        reviewed = candidates(db)
+        assert len(reviewed) == 6
+        assert reviewed[0].available and not reviewed[0].demo_only and reviewed[0].price_bani == 77_000
     engine.dispose()
